@@ -102,6 +102,7 @@
 #include "extensiondata.h"
 #include "filesearcher.h"
 #include "filterparserthread.h"
+#include "dhtharvester.h"
 #include "loadtorrentparams.h"
 #include "lttypecast.h"
 #include "nativesessionextension.h"
@@ -444,6 +445,9 @@ SessionImpl::SessionImpl(QObject *parent)
     , m_isDHTEnabled(BITTORRENT_SESSION_KEY(u"DHTEnabled"_s), true)
     , m_isLSDEnabled(BITTORRENT_SESSION_KEY(u"LSDEnabled"_s), true)
     , m_isPeXEnabled(BITTORRENT_SESSION_KEY(u"PeXEnabled"_s), true)
+    , m_isDHTHarvesterEnabled(BITTORRENT_SESSION_KEY(u"DHTHarvesterEnabled"_s), false)
+    , m_isDHTHarvesterActiveCrawlEnabled(BITTORRENT_SESSION_KEY(u"DHTHarvesterActiveCrawl"_s), true)
+    , m_dhtHarvesterMaxConcurrentMetadata(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxConcurrentMetadata"_s), 20)
     , m_isIPFilteringEnabled(BITTORRENT_SESSION_KEY(u"IPFilteringEnabled"_s), false)
     , m_isTrackerFilteringEnabled(BITTORRENT_SESSION_KEY(u"TrackerFilteringEnabled"_s), false)
     , m_IPFilterFile(BITTORRENT_SESSION_KEY(u"IPFilter"_s))
@@ -694,6 +698,11 @@ SessionImpl::SessionImpl(QObject *parent)
 
 SessionImpl::~SessionImpl()
 {
+    // Stop and destroy the DHT harvester first: its teardown cancels in-flight
+    // metadata downloads via the still-alive native session.
+    delete m_dhtHarvester;
+    m_dhtHarvester = nullptr;
+
     m_nativeSession->pause();
 
     const auto timeout = (m_shutdownTimeout >= 0) ? (static_cast<qint64>(m_shutdownTimeout) * 1000) : -1;
@@ -802,6 +811,98 @@ void SessionImpl::setPeXEnabled(const bool enabled)
     m_isPeXEnabled = enabled;
     if (m_wasPexEnabled != enabled)
         LogMsg(tr("Restart is required to toggle Peer Exchange (PeX) support"), Log::WARNING);
+}
+
+bool SessionImpl::isDHTHarvesterEnabled() const
+{
+    return m_isDHTHarvesterEnabled;
+}
+
+void SessionImpl::setDHTHarvesterEnabled(const bool enabled)
+{
+    if (enabled == m_isDHTHarvesterEnabled)
+        return;
+
+    m_isDHTHarvesterEnabled = enabled;
+    // The DHT alert category is part of the alert mask, so toggle it live.
+    configureDeferred();
+    if (m_dhtHarvester)
+        m_dhtHarvester->setEnabled(enabled);
+}
+
+bool SessionImpl::isDHTHarvesterActiveCrawlEnabled() const
+{
+    return m_isDHTHarvesterActiveCrawlEnabled;
+}
+
+void SessionImpl::setDHTHarvesterActiveCrawlEnabled(const bool enabled)
+{
+    if (enabled == m_isDHTHarvesterActiveCrawlEnabled)
+        return;
+
+    m_isDHTHarvesterActiveCrawlEnabled = enabled;
+    if (m_dhtHarvester)
+        m_dhtHarvester->setActiveCrawlEnabled(enabled);
+}
+
+int SessionImpl::DHTHarvesterMaxConcurrentMetadata() const
+{
+    return m_dhtHarvesterMaxConcurrentMetadata;
+}
+
+void SessionImpl::setDHTHarvesterMaxConcurrentMetadata(const int value)
+{
+    if (value == m_dhtHarvesterMaxConcurrentMetadata)
+        return;
+
+    m_dhtHarvesterMaxConcurrentMetadata = value;
+    if (m_dhtHarvester)
+        m_dhtHarvester->setMaxConcurrentMetadata(value);
+}
+
+QList<HarvestSearchResult> SessionImpl::searchDHTIndex(const QString &query, const int limit) const
+{
+    if (!m_dhtHarvester)
+        return {};
+
+    HarvestStore *store = m_dhtHarvester->store();
+    if (!store)
+        return {};
+
+    QList<HarvestSearchResult> results;
+    QMetaObject::invokeMethod(store, [store, query, limit] { return store->search(query, limit); }
+        , Qt::BlockingQueuedConnection, &results);
+    return results;
+}
+
+QList<HarvestSearchResult> SessionImpl::recentDHTIndex(const int limit) const
+{
+    if (!m_dhtHarvester)
+        return {};
+
+    HarvestStore *store = m_dhtHarvester->store();
+    if (!store)
+        return {};
+
+    QList<HarvestSearchResult> results;
+    QMetaObject::invokeMethod(store, [store, limit] { return store->recent(limit); }
+        , Qt::BlockingQueuedConnection, &results);
+    return results;
+}
+
+HarvestStats SessionImpl::dhtHarvestStats() const
+{
+    if (!m_dhtHarvester)
+        return {};
+
+    HarvestStore *store = m_dhtHarvester->store();
+    if (!store)
+        return {};
+
+    HarvestStats result;
+    QMetaObject::invokeMethod(store, [store] { return store->stats(); }
+        , Qt::BlockingQueuedConnection, &result);
+    return result;
 }
 
 bool SessionImpl::isDownloadPathEnabled() const
@@ -1795,6 +1896,14 @@ void SessionImpl::initializeNativeSession()
     auto nativeSessionExtension = std::make_shared<NativeSessionExtension>();
     m_nativeSession->add_extension(nativeSessionExtension);
     m_nativeSessionExtension = nativeSessionExtension.get();
+
+    // DHT harvester: discovers and indexes torrents from the BitTorrent DHT into
+    // a local SQLite index. Disabled by default; requires VPN-bound egress.
+    const Path harvestDBPath = specialFolderLocation(SpecialFolder::Data) / Path(u"dht_index.db"_s);
+    m_dhtHarvester = new DHTHarvester(this, m_nativeSession, harvestDBPath);
+    m_dhtHarvester->setActiveCrawlEnabled(isDHTHarvesterActiveCrawlEnabled());
+    m_dhtHarvester->setMaxConcurrentMetadata(DHTHarvesterMaxConcurrentMetadata());
+    m_dhtHarvester->setEnabled(isDHTHarvesterEnabled());
 }
 
 void SessionImpl::processBannedIPs(lt::ip_filter &filter)
@@ -1875,7 +1984,8 @@ lt::settings_pack SessionImpl::loadLTSettings() const
         | lt::alert::port_mapping_notification
         | lt::alert::status_notification
         | lt::alert::storage_notification
-        | lt::alert::tracker_notification;
+        | lt::alert::tracker_notification
+        | (isDHTHarvesterEnabled() ? lt::alert::dht_notification : lt::alert_category_t());
     settingsPack.set_int(lt::settings_pack::alert_mask, alertMask);
 
     settingsPack.set_int(lt::settings_pack::connection_speed, connectionSpeed());
@@ -5911,6 +6021,13 @@ void SessionImpl::handleAlert(lt::alert *alert)
             handleTorrentConflictAlert(static_cast<const lt::torrent_conflict_alert *>(alert));
             break;
 #endif
+        case lt::dht_get_peers_alert::alert_type:
+        case lt::dht_announce_alert::alert_type:
+        case lt::dht_sample_infohashes_alert::alert_type:
+        case lt::dht_live_nodes_alert::alert_type:
+            if (m_dhtHarvester)
+                m_dhtHarvester->handleAlert(alert);
+            break;
         }
     }
     catch (const std::exception &exc)
