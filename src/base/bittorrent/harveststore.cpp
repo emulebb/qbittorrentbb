@@ -44,7 +44,7 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace
 {
-    const int DB_VERSION = 1;
+    const int DB_VERSION = 2;
 
     // Fetch-backoff policy for metadata acquisition.
     const int MAX_FETCH_ATTEMPTS = 5;
@@ -201,6 +201,7 @@ void HarvestStore::createSchema()
              u"file_count INTEGER NOT NULL DEFAULT 0,"
              u"piece_length INTEGER NOT NULL DEFAULT 0,"
              u"metadata_fetched INTEGER NOT NULL DEFAULT 0,"
+             u"metadata BLOB,"
              u"fetch_attempts INTEGER NOT NULL DEFAULT 0,"
              u"last_attempt_ms INTEGER NOT NULL DEFAULT 0,"
              u"availability_score INTEGER NOT NULL DEFAULT 0,"
@@ -306,12 +307,12 @@ void HarvestStore::recordMetadata(const HarvestedTorrent &torrent)
     {
         query.prepare(u"INSERT INTO torrents"
                       u" (infohash_v1, infohash_v2, name, normalized_name, size_bytes, file_count,"
-                      u"  piece_length, metadata_fetched, first_seen_ms, last_seen_ms, updated_at_ms)"
-                      u" VALUES (:ih, :ih2, :name, :norm, :size, :files, :piece, 1, :now, :now, :now)"
+                      u"  piece_length, metadata, metadata_fetched, first_seen_ms, last_seen_ms, updated_at_ms)"
+                      u" VALUES (:ih, :ih2, :name, :norm, :size, :files, :piece, :meta, 1, :now, :now, :now)"
                       u" ON CONFLICT(infohash_v1) DO UPDATE SET"
                       u" infohash_v2 = :ih2, name = :name, normalized_name = :norm,"
                       u" size_bytes = :size, file_count = :files, piece_length = :piece,"
-                      u" metadata_fetched = 1, last_seen_ms = :now, updated_at_ms = :now;"_s);
+                      u" metadata = :meta, metadata_fetched = 1, last_seen_ms = :now, updated_at_ms = :now;"_s);
         query.bindValue(u":ih"_s, torrent.infoHashV1);
         query.bindValue(u":ih2"_s, torrent.infoHashV2.isEmpty() ? QVariant() : QVariant(torrent.infoHashV2));
         query.bindValue(u":name"_s, torrent.name);
@@ -319,6 +320,7 @@ void HarvestStore::recordMetadata(const HarvestedTorrent &torrent)
         query.bindValue(u":size"_s, torrent.size);
         query.bindValue(u":files"_s, torrent.fileCount);
         query.bindValue(u":piece"_s, torrent.pieceLength);
+        query.bindValue(u":meta"_s, torrent.rawMetadata.isEmpty() ? QVariant() : QVariant(torrent.rawMetadata));
         query.bindValue(u":now"_s, now);
         if (!query.exec())
             throw RuntimeError(query.lastError().text());
@@ -476,6 +478,21 @@ QList<HarvestSearchResult> HarvestStore::recent(int limit) const
     }
 
     return results;
+}
+
+QByteArray HarvestStore::metadataFor(const QString &infoHashV1) const
+{
+    if (infoHashV1.isEmpty())
+        return {};
+
+    auto db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery query {db};
+    query.prepare(u"SELECT metadata FROM torrents WHERE infohash_v1 = :ih AND metadata_fetched = 1;"_s);
+    query.bindValue(u":ih"_s, infoHashV1);
+    if (!query.exec() || !query.next())
+        return {};
+
+    return query.value(0).toByteArray();
 }
 
 HarvestStats HarvestStore::stats() const

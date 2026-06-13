@@ -424,6 +424,7 @@ void DHTHarvester::onMetadataDownloaded(const TorrentInfo &info)
     torrent.name = info.name();
     torrent.size = info.totalSize();
     torrent.fileCount = info.filesCount();
+    torrent.rawMetadata = info.rawData();  // bencoded info-dict, for reconstruction
     torrent.files.reserve(info.filesCount());
     for (int i = 0; i < info.filesCount(); ++i)
     {
