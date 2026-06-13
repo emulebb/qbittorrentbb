@@ -53,6 +53,7 @@ add_library(qbt_gui STATIC
     deletionconfirmationdialog.h
     desktopintegration.h
     dhtindex/dhtindexwidget.h
+    dhtindex/harvestcontenthandler.h
     downloadfromurldialog.h
     executionlogwidget.h
     filterpatternformat.h
@@ -160,6 +161,7 @@ add_library(qbt_gui STATIC
     deletionconfirmationdialog.cpp
     desktopintegration.cpp
     dhtindex/dhtindexwidget.cpp
+    dhtindex/harvestcontenthandler.cpp
     downloadfromurldialog.cpp
     executionlogwidget.cpp
     filterpatternformatmenu.cpp

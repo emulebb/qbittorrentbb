@@ -28,6 +28,8 @@
 
 #include "dhtindexwidget.h"
 
+#include <optional>
+
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -38,14 +40,20 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QPushButton>
+#include <QSplitter>
 #include <QTableWidget>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include "base/bittorrent/addtorrentparams.h"
 #include "base/bittorrent/session.h"
 #include "base/bittorrent/torrentdescriptor.h"
+#include "base/bittorrent/torrentinfo.h"
 #include "base/utils/misc.h"
+#include "gui/addnewtorrentdialog.h"
+#include "gui/torrentcontentwidget.h"
+#include "harvestcontenthandler.h"
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -63,6 +71,20 @@ namespace
 
     const int SEARCH_LIMIT = 500;
     const int FEED_LIMIT = 200;  // capped live feed of most-recent indexed torrents
+
+    // Reconstruct a torrent descriptor from a stored bencoded info-dict by wrapping
+    // it back into a minimal torrent ("d4:info<info-dict>e").
+    std::optional<BitTorrent::TorrentDescriptor> descriptorFromMetadata(const QByteArray &infoDict)
+    {
+        if (infoDict.isEmpty())
+            return std::nullopt;
+
+        const QByteArray buffer = QByteArrayLiteral("d4:info") + infoDict + QByteArrayLiteral("e");
+        const auto descr = BitTorrent::TorrentDescriptor::load(buffer);
+        if (!descr)
+            return std::nullopt;
+        return descr.value();
+    }
 }
 
 DHTIndexWidget::DHTIndexWidget(QWidget *parent)
@@ -102,7 +124,26 @@ DHTIndexWidget::DHTIndexWidget(QWidget *parent)
     m_table->verticalHeader()->setVisible(false);
     m_table->horizontalHeader()->setSectionResizeMode(COL_NAME, QHeaderView::Stretch);
     connect(m_table, &QWidget::customContextMenuRequested, this, &DHTIndexWidget::showContextMenu);
-    layout->addWidget(m_table);
+    connect(m_table, &QTableWidget::itemSelectionChanged, this, &DHTIndexWidget::onSelectionChanged);
+
+    // Lower pane: the standard qBittorrent content tree for the selected torrent.
+    m_content = new TorrentContentWidget(this);
+
+    auto *splitter = new QSplitter(Qt::Vertical, this);
+    splitter->setChildrenCollapsible(false);
+    splitter->addWidget(m_table);
+    splitter->addWidget(m_content);
+    splitter->setStretchFactor(0, 2);
+    splitter->setStretchFactor(1, 1);
+    layout->addWidget(splitter, 1);
+
+    auto *bottomRow = new QHBoxLayout;
+    bottomRow->addStretch(1);
+    m_downloadButton = new QPushButton(tr("Download"), this);
+    m_downloadButton->setEnabled(false);
+    connect(m_downloadButton, &QPushButton::clicked, this, &DHTIndexWidget::downloadSelected);
+    bottomRow->addWidget(m_downloadButton);
+    layout->addLayout(bottomRow);
 
     m_statsTimer = new QTimer(this);
     m_statsTimer->setInterval(2000);
@@ -167,6 +208,58 @@ void DHTIndexWidget::setRows(const QList<BitTorrent::HarvestSearchResult> &resul
         m_table->selectRow(selectedRow);
 }
 
+void DHTIndexWidget::onSelectionChanged()
+{
+    if (m_contentHandler)
+    {
+        m_content->setContentHandler(nullptr);
+        delete m_contentHandler;
+        m_contentHandler = nullptr;
+    }
+
+    const QString infoHash = selectedInfoHash();
+    const QByteArray infoDict = infoHash.isEmpty()
+            ? QByteArray() : BitTorrent::Session::instance()->dhtTorrentMetadata(infoHash);
+    if (const auto descr = descriptorFromMetadata(infoDict); descr && descr->info())
+    {
+        m_contentHandler = new HarvestContentHandler(descr->info().value(), this);
+        m_content->setContentHandler(m_contentHandler);
+        m_content->refresh();
+    }
+
+    // Allow downloading any selected torrent (metadata is fetched on add if absent).
+    m_downloadButton->setEnabled(!infoHash.isEmpty());
+}
+
+void DHTIndexWidget::downloadSelected()
+{
+    const QString infoHash = selectedInfoHash();
+    if (infoHash.isEmpty())
+        return;
+
+    std::optional<BitTorrent::TorrentDescriptor> descr =
+            descriptorFromMetadata(BitTorrent::Session::instance()->dhtTorrentMetadata(infoHash));
+    if (!descr)
+    {
+        // No stored metadata yet: fall back to a magnet, the add dialog fetches it.
+        const auto parsed = BitTorrent::TorrentDescriptor::parse(selectedMagnet());
+        if (!parsed)
+            return;
+        descr = parsed.value();
+    }
+
+    // Open the standard "Add new torrent" dialog so it behaves exactly like adding
+    // any other torrent (content tree, save path, start option).
+    auto *dlg = new AddNewTorrentDialog(descr.value(), {}, this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dlg, &AddNewTorrentDialog::torrentAccepted, this
+            , [](const BitTorrent::TorrentDescriptor &td, const BitTorrent::AddTorrentParams &ap)
+    {
+        BitTorrent::Session::instance()->addTorrent(td, ap);
+    });
+    dlg->show();
+}
+
 QString DHTIndexWidget::selectedInfoHash() const
 {
     const QTableWidgetItem *item = m_table->item(m_table->currentRow(), COL_NAME);
@@ -199,12 +292,7 @@ void DHTIndexWidget::showContextMenu(const QPoint &pos)
     {
         QApplication::clipboard()->setText(selectedMagnet());
     });
-    menu->addAction(tr("Download"), this, [this]
-    {
-        const auto descr = BitTorrent::TorrentDescriptor::parse(selectedMagnet());
-        if (descr)
-            BitTorrent::Session::instance()->addTorrent(descr.value());
-    });
+    menu->addAction(tr("Download..."), this, &DHTIndexWidget::downloadSelected);
 
     menu->popup(m_table->viewport()->mapToGlobal(pos));
 }
