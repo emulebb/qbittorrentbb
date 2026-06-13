@@ -77,6 +77,7 @@ namespace BitTorrent
     enum class MoveStorageMode;
     enum class MoveStorageContext;
 
+    class DHTHarvester;
     class InfoHash;
     class ResumeDataStorage;
     class Torrent;
@@ -197,6 +198,15 @@ namespace BitTorrent
         void setLSDEnabled(bool enabled) override;
         bool isPeXEnabled() const override;
         void setPeXEnabled(bool enabled) override;
+        bool isDHTHarvesterEnabled() const override;
+        void setDHTHarvesterEnabled(bool enabled) override;
+        bool isDHTHarvesterActiveCrawlEnabled() const override;
+        void setDHTHarvesterActiveCrawlEnabled(bool enabled) override;
+        int DHTHarvesterMaxConcurrentMetadata() const override;
+        void setDHTHarvesterMaxConcurrentMetadata(int value) override;
+        QList<HarvestSearchResult> searchDHTIndex(const QString &query, int limit) const override;
+        QList<HarvestSearchResult> recentDHTIndex(int limit) const override;
+        HarvestStats dhtHarvestStats() const override;
         bool isAddTorrentToQueueTop() const override;
         void setAddTorrentToQueueTop(bool value) override;
         bool isAddTorrentStopped() const override;
@@ -656,6 +666,9 @@ namespace BitTorrent
         CachedSettingValue<bool> m_isDHTEnabled;
         CachedSettingValue<bool> m_isLSDEnabled;
         CachedSettingValue<bool> m_isPeXEnabled;
+        CachedSettingValue<bool> m_isDHTHarvesterEnabled;
+        CachedSettingValue<bool> m_isDHTHarvesterActiveCrawlEnabled;
+        CachedSettingValue<int> m_dhtHarvesterMaxConcurrentMetadata;
         CachedSettingValue<bool> m_isIPFilteringEnabled;
         CachedSettingValue<bool> m_isTrackerFilteringEnabled;
         CachedSettingValue<Path> m_IPFilterFile;
@@ -833,6 +846,8 @@ namespace BitTorrent
         QList<AddTorrentAlertHandler> m_addTorrentAlertHandlers;
 
         QHash<TorrentID, lt::torrent_handle> m_downloadedMetadata;
+
+        DHTHarvester *m_dhtHarvester = nullptr;
 
         QHash<TorrentID, TorrentImpl *> m_torrents;
         QHash<TorrentID, TorrentImpl *> m_hybridTorrentsByAltID;

@@ -37,6 +37,7 @@
 #include "addtorrenterror.h"
 #include "addtorrentparams.h"
 #include "categoryoptions.h"
+#include "harveststore.h"
 #include "sharelimits.h"
 #include "torrentcontentremoveoption.h"
 #include "trackerentry.h"
@@ -217,6 +218,15 @@ namespace BitTorrent
         virtual void setLSDEnabled(bool enabled) = 0;
         virtual bool isPeXEnabled() const = 0;
         virtual void setPeXEnabled(bool enabled) = 0;
+        virtual bool isDHTHarvesterEnabled() const = 0;
+        virtual void setDHTHarvesterEnabled(bool enabled) = 0;
+        virtual bool isDHTHarvesterActiveCrawlEnabled() const = 0;
+        virtual void setDHTHarvesterActiveCrawlEnabled(bool enabled) = 0;
+        virtual int DHTHarvesterMaxConcurrentMetadata() const = 0;
+        virtual void setDHTHarvesterMaxConcurrentMetadata(int value) = 0;
+        virtual QList<HarvestSearchResult> searchDHTIndex(const QString &query, int limit) const = 0;
+        virtual QList<HarvestSearchResult> recentDHTIndex(int limit) const = 0;
+        virtual HarvestStats dhtHarvestStats() const = 0;
         virtual bool isAddTorrentToQueueTop() const = 0;
         virtual void setAddTorrentToQueueTop(bool value) = 0;
         virtual bool isAddTorrentStopped() const = 0;
