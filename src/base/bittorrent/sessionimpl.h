@@ -206,6 +206,7 @@ namespace BitTorrent
         void setDHTHarvesterMaxConcurrentMetadata(int value) override;
         QList<HarvestSearchResult> searchDHTIndex(const QString &query, int limit) const override;
         QList<HarvestSearchResult> recentDHTIndex(int limit) const override;
+        QByteArray dhtTorrentMetadata(const QString &infoHashV1) const override;
         HarvestStats dhtHarvestStats() const override;
         bool isAddTorrentToQueueTop() const override;
         void setAddTorrentToQueueTop(bool value) override;

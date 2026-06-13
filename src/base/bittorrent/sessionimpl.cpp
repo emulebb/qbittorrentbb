@@ -890,6 +890,21 @@ QList<HarvestSearchResult> SessionImpl::recentDHTIndex(const int limit) const
     return results;
 }
 
+QByteArray SessionImpl::dhtTorrentMetadata(const QString &infoHashV1) const
+{
+    if (!m_dhtHarvester)
+        return {};
+
+    HarvestStore *store = m_dhtHarvester->store();
+    if (!store)
+        return {};
+
+    QByteArray result;
+    QMetaObject::invokeMethod(store, [store, infoHashV1] { return store->metadataFor(infoHashV1); }
+        , Qt::BlockingQueuedConnection, &result);
+    return result;
+}
+
 HarvestStats SessionImpl::dhtHarvestStats() const
 {
     if (!m_dhtHarvester)

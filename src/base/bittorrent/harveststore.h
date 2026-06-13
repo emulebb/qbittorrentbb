@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <QByteArray>
 #include <QList>
 #include <QMetaType>
 #include <QObject>
@@ -54,6 +55,7 @@ namespace BitTorrent
         int fileCount = 0;
         qint64 pieceLength = 0;
         QList<HarvestedFile> files;
+        QByteArray rawMetadata;   // bencoded info-dict, for reconstructing the torrent
     };
 
     // A single discovery event for an infohash (the "snoop"/demand signal).
@@ -118,6 +120,7 @@ namespace BitTorrent
         // Readers (may be invoked via BlockingQueuedConnection from the GUI).
         QList<BitTorrent::HarvestSearchResult> search(const QString &query, int limit) const;
         QList<BitTorrent::HarvestSearchResult> recent(int limit) const;
+        QByteArray metadataFor(const QString &infoHashV1) const;
         BitTorrent::HarvestStats stats() const;
 
     private:

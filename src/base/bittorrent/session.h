@@ -43,6 +43,7 @@
 #include "trackerentry.h"
 #include "trackerentrystatus.h"
 
+class QByteArray;
 class QString;
 
 namespace BitTorrent
@@ -226,6 +227,7 @@ namespace BitTorrent
         virtual void setDHTHarvesterMaxConcurrentMetadata(int value) = 0;
         virtual QList<HarvestSearchResult> searchDHTIndex(const QString &query, int limit) const = 0;
         virtual QList<HarvestSearchResult> recentDHTIndex(int limit) const = 0;
+        virtual QByteArray dhtTorrentMetadata(const QString &infoHashV1) const = 0;
         virtual HarvestStats dhtHarvestStats() const = 0;
         virtual bool isAddTorrentToQueueTop() const = 0;
         virtual void setAddTorrentToQueueTop(bool value) = 0;
