@@ -51,6 +51,7 @@ class DownloadFromURLDialog;
 class ExecutionLogWidget;
 class LineEdit;
 class OptionsDialog;
+class DHTIndexWidget;
 class PowerManagement;
 class ProgramUpdater;
 class PropertiesWidget;
@@ -244,6 +245,7 @@ private:
     QAction *m_queueSeparatorMenu = nullptr;
     QSplitter *m_splitter = nullptr;
     QPointer<SearchWidget> m_searchWidget;
+    QPointer<DHTIndexWidget> m_dhtIndexWidget;
     QPointer<RSSWidget> m_rssWidget;
     QPointer<ExecutionLogWidget> m_executionLog;
     // Power Management

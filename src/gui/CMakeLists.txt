@@ -52,6 +52,7 @@ add_library(qbt_gui STATIC
     cookiesmodel.h
     deletionconfirmationdialog.h
     desktopintegration.h
+    dhtindex/dhtindexwidget.h
     downloadfromurldialog.h
     executionlogwidget.h
     filterpatternformat.h
@@ -158,6 +159,7 @@ add_library(qbt_gui STATIC
     cookiesmodel.cpp
     deletionconfirmationdialog.cpp
     desktopintegration.cpp
+    dhtindex/dhtindexwidget.cpp
     downloadfromurldialog.cpp
     executionlogwidget.cpp
     filterpatternformatmenu.cpp

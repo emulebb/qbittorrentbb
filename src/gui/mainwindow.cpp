@@ -78,6 +78,7 @@
 #include "autoexpandabledialog.h"
 #include "cookiesdialog.h"
 #include "desktopintegration.h"
+#include "dhtindex/dhtindexwidget.h"
 #include "downloadfromurldialog.h"
 #include "executionlogwidget.h"
 #include "hidabletabwidget.h"
@@ -263,6 +264,9 @@ MainWindow::MainWindow(IGUIApplication *app, const WindowState initialState, con
         UIThemeManager::instance()->getIcon(u"folder-remote"_s),
 #endif
         tr("Transfers"));
+
+    m_dhtIndexWidget = new DHTIndexWidget(m_tabs);
+    m_tabs->addTab(m_dhtIndexWidget, tr("DHT Index"));
     // Filter types
     const QList<TransferListModel::Column> filterTypes = {TransferListModel::Column::TR_NAME, TransferListModel::Column::TR_SAVE_PATH};
     for (const TransferListModel::Column type : filterTypes)
