@@ -28,50 +28,35 @@
 
 #pragma once
 
-#include <QList>
-#include <QWidget>
+#include "base/bittorrent/torrentcontenthandler.h"
+#include "base/bittorrent/torrentinfo.h"
 
-#include "base/bittorrent/harveststore.h"
-
-class QCheckBox;
-class QLabel;
-class QLineEdit;
-class QPoint;
-class QPushButton;
-class QTableWidget;
-class QTimer;
-
-class HarvestContentHandler;
-class TorrentContentWidget;
-
-// In-app search/browse view over the locally harvested BitTorrent DHT index.
-class DHTIndexWidget final : public QWidget
+// Read-only TorrentContentHandler over harvested torrent metadata, so the DHT
+// Index tab can show a fetched torrent's content tree with qBittorrent's normal
+// TorrentContentWidget, exactly like any other (not-yet-added) torrent. The
+// torrent is not in the session, so progress/availability are empty and the
+// mutating operations are no-ops.
+class HarvestContentHandler final : public BitTorrent::TorrentContentHandler
 {
-    Q_OBJECT
-    Q_DISABLE_COPY_MOVE(DHTIndexWidget)
-
 public:
-    explicit DHTIndexWidget(QWidget *parent = nullptr);
+    HarvestContentHandler(const BitTorrent::TorrentInfo &torrentInfo, QObject *parent = nullptr);
 
-private slots:
-    void search();
-    void refreshStats();
-    void onEnabledToggled(bool enabled);
-    void onSelectionChanged();
-    void downloadSelected();
-    void showContextMenu(const QPoint &pos);
+    bool hasMetadata() const override;
+    int filesCount() const override;
+    Path filePath(int index) const override;
+    qlonglong fileSize(int index) const override;
+    Path actualStorageLocation() const override;
+    Path actualFilePath(int fileIndex) const override;
+    QList<BitTorrent::DownloadPriority> filePriorities() const override;
+    QList<qreal> filesProgress() const override;
+    QFuture<QList<qreal>> fetchAvailableFileFractions() const override;
+
+    void renameFile(int index, const Path &newPath) override;
+    void prioritizeFiles(const QList<BitTorrent::DownloadPriority> &priorities) override;
+    void flushCache() const override;
 
 private:
-    void setRows(const QList<BitTorrent::HarvestSearchResult> &rows);
-    QString selectedInfoHash() const;
-    QString selectedMagnet() const;
+    void doRenameFolder(const Path &oldFolderPath, const Path &newFolderPath) override;
 
-    QCheckBox *m_enableBox = nullptr;
-    QLabel *m_statsLabel = nullptr;
-    QLineEdit *m_searchEdit = nullptr;
-    QTableWidget *m_table = nullptr;
-    QPushButton *m_downloadButton = nullptr;
-    TorrentContentWidget *m_content = nullptr;
-    HarvestContentHandler *m_contentHandler = nullptr;
-    QTimer *m_statsTimer = nullptr;
+    const BitTorrent::TorrentInfo m_torrentInfo;
 };
