@@ -67,12 +67,24 @@ namespace
     const int TIMEOUT_SWEEP_MS = 5000;
     const qint64 METADATA_TIMEOUT_MS = 30 * 1000;
 
-    // Popularity gate: an infohash seen via get_peers/sample is only queued for
-    // metadata once it has been observed this many times. Repeat sightings mean
-    // peers are actively looking for it (= alive = fetchable), so fetch slots are
-    // spent on torrents that resolve instead of dead one-off hashes. An announce
-    // (a peer declaring it HAS the content) bypasses this and queues immediately.
-    const int METADATA_POPULARITY_THRESHOLD = 2;
+    // Metadata scheduler: periodically top up the fetch queue from the PERSISTENT
+    // store (infohashes still lacking metadata, most promising first by
+    // availability/recency, off backoff). This drives coverage across sessions --
+    // an infohash seen once still gets fetched eventually -- without an unbounded
+    // in-memory popularity table. The in-memory pending queue is capped so a
+    // discovery firehose never grows memory; the store re-supplies as slots free.
+    const int SCHEDULE_INTERVAL_MS = 3000;
+    const int MAX_PENDING = 2000;
+
+    // Retention: keep the index useful instead of letting metadata-less sightings
+    // accumulate forever. A metadata-less infohash that exhausted its fetch
+    // attempts and has not been seen for STALE_AGE is dropped; sightings older
+    // than SIGHTING_RETENTION are pruned (fastest-growing table); the torrents
+    // table is hard-capped at MAX_INDEX_TORRENTS (oldest metadata-less first).
+    const int PRUNE_INTERVAL_MS = 30 * 60 * 1000;       // 30 min
+    const qint64 STALE_AGE_MS = qint64(7) * 24 * 60 * 60 * 1000;        // 7 days
+    const qint64 SIGHTING_RETENTION_MS = qint64(3) * 24 * 60 * 60 * 1000; // 3 days
+    const qint64 MAX_INDEX_TORRENTS = 1000000;
 
     qint64 nowMs()
     {
@@ -103,11 +115,17 @@ DHTHarvester::DHTHarvester(Session *session, lt::session *nativeSession, const P
     , m_path {dbPath}
     , m_sampleTimer {new QTimer(this)}
     , m_timeoutTimer {new QTimer(this)}
+    , m_scheduleTimer {new QTimer(this)}
+    , m_pruneTimer {new QTimer(this)}
 {
     m_sampleTimer->setInterval(SAMPLE_INTERVAL_MS);
     m_timeoutTimer->setInterval(TIMEOUT_SWEEP_MS);
+    m_scheduleTimer->setInterval(SCHEDULE_INTERVAL_MS);
+    m_pruneTimer->setInterval(PRUNE_INTERVAL_MS);
     connect(m_sampleTimer, &QTimer::timeout, this, &DHTHarvester::onSampleTimer);
     connect(m_timeoutTimer, &QTimer::timeout, this, &DHTHarvester::onTimeoutTimer);
+    connect(m_scheduleTimer, &QTimer::timeout, this, &DHTHarvester::onScheduleTimer);
+    connect(m_pruneTimer, &QTimer::timeout, this, &DHTHarvester::onPruneTimer);
     connect(m_session, &Session::metadataDownloaded, this, &DHTHarvester::onMetadataDownloaded);
 }
 
@@ -178,6 +196,8 @@ void DHTHarvester::start()
 
     m_sampleTimer->start();
     m_timeoutTimer->start();
+    m_scheduleTimer->start();
+    m_pruneTimer->start();
     m_running = true;
 
     LogMsg(tr("DHT harvester started (egress bound to interface \"%1\").").arg(m_session->networkInterfaceName()), Log::INFO);
@@ -187,13 +207,14 @@ void DHTHarvester::stop()
 {
     m_sampleTimer->stop();
     m_timeoutTimer->stop();
+    m_scheduleTimer->stop();
+    m_pruneTimer->stop();
 
     for (auto it = m_inFlight.cbegin(); it != m_inFlight.cend(); ++it)
         m_session->cancelDownloadMetadata(TorrentID::fromString(it.key()));
     m_inFlight.clear();
     m_pending.clear();
     m_queued.clear();
-    m_sightCount.clear();
     m_done.clear();
 
     if (m_storeThread)
@@ -252,8 +273,9 @@ void DHTHarvester::handleAlert(const lt::alert *alert)
         {
             const auto *a = static_cast<const lt::dht_get_peers_alert *>(alert);
             const QString ih = hexOf(a->info_hash);
+            // Record the sighting; the store-driven scheduler picks it up by
+            // availability/recency on the next tick (no in-memory popularity gate).
             postSighting(ih, u"get_peers"_s, {}, 0);
-            considerForMetadata(ih);
         }
         break;
     case lt::dht_announce_alert::alert_type:
@@ -262,7 +284,6 @@ void DHTHarvester::handleAlert(const lt::alert *alert)
             const QString ih = hexOf(a->info_hash);
             const QString peerIP = QString::fromStdString(a->ip.to_string());
             postSighting(ih, u"announce"_s, peerIP, a->port);
-            ++m_sightCount[ih];
             enqueue(ih);  // a peer HAS it -> fetch immediately
             // The announcing peer holds the torrent: feed it straight to the
             // in-flight metadata download instead of re-finding peers via DHT.
@@ -277,7 +298,6 @@ void DHTHarvester::handleAlert(const lt::alert *alert)
             {
                 const QString ih = hexOf(sample);
                 postSighting(ih, u"sample"_s, {}, 0);
-                considerForMetadata(ih);
             }
             // Recurse into the returned (closer) nodes to traverse this region of
             // the keyspace more deeply, bounded by the per-tick sample budget.
@@ -407,24 +427,58 @@ void DHTHarvester::onTimeoutTimer()
     pump();
 }
 
-void DHTHarvester::considerForMetadata(const QString &infoHashV1)
-{
-    if (infoHashV1.isEmpty() || m_done.contains(infoHashV1) || m_queued.contains(infoHashV1))
-        return;
-
-    // Only queue once the infohash has been observed enough times to look alive.
-    if (++m_sightCount[infoHashV1] >= METADATA_POPULARITY_THRESHOLD)
-        enqueue(infoHashV1);
-}
-
 void DHTHarvester::enqueue(const QString &infoHashV1)
 {
     if (infoHashV1.isEmpty() || m_done.contains(infoHashV1) || m_queued.contains(infoHashV1))
         return;
 
+    // Cap the in-memory queue: at the DHT discovery rate the candidate set is
+    // effectively unbounded, but the persistent store holds it all and the
+    // scheduler re-supplies as fetch slots free, so dropping here is safe.
+    if (m_pending.size() >= MAX_PENDING)
+        return;
+
     m_queued.insert(infoHashV1);
     m_pending.enqueue(infoHashV1);
     pump();
+}
+
+void DHTHarvester::onScheduleTimer()
+{
+    if (!m_running || !m_store)
+        return;
+
+    const int room = m_maxConcurrent - m_inFlight.size();
+    if ((room <= 0) || (m_pending.size() >= MAX_PENDING))
+        return;
+
+    // Pull a little ahead of the free slots so the pump never starves; the store
+    // returns only infohashes that still need metadata and are off backoff,
+    // most promising first.
+    const int batch = qMin(room * 4, MAX_PENDING - m_pending.size());
+    QList<QString> candidates;
+    QMetaObject::invokeMethod(m_store, [store = m_store, batch] { return store->candidatesForMetadata(batch); }
+        , Qt::BlockingQueuedConnection, &candidates);
+
+    for (const QString &ih : candidates)
+        enqueue(ih);
+}
+
+void DHTHarvester::onPruneTimer()
+{
+    if (!m_store)
+        return;
+
+    // Run the retention sweep on the store thread and log what it removed.
+    QMetaObject::invokeMethod(m_store, [store = m_store]
+    {
+        const HarvestPruneStats s = store->prune(STALE_AGE_MS, SIGHTING_RETENTION_MS, MAX_INDEX_TORRENTS);
+        if ((s.torrentsPruned > 0) || (s.sightingsPruned > 0))
+        {
+            LogMsg(QObject::tr("DHT harvest retention: pruned %1 stale torrents and %2 old sightings.")
+                    .arg(s.torrentsPruned).arg(s.sightingsPruned), Log::INFO);
+        }
+    }, Qt::QueuedConnection);
 }
 
 void DHTHarvester::pump()
