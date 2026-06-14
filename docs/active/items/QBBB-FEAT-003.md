@@ -1,5 +1,5 @@
 ---
-id: FEAT-003
+id: QBBB-FEAT-003
 workflow: github
 github_issue: https://github.com/emulebb/qbittorrentbb/issues/3
 title: Indexer schema + Torznab contract parity with emulebb-rust
@@ -14,12 +14,12 @@ source: suite forward program (notes 14-15); SUITE-JOINT-ROADMAP
 
 > Workflow status is tracked in GitHub: https://github.com/emulebb/qbittorrentbb/issues/3. This local document is retained as an engineering spec/evidence record.
 
-# FEAT-003 - Indexer schema + Torznab contract parity with emulebb-rust
+# QBBB-FEAT-003 - Indexer schema + Torznab contract parity with emulebb-rust
 
 ## Summary
 
 Keep the qBittorrentBB harvester index and Torznab endpoint structurally aligned
-with the emulebb-rust Kad/eD2K indexer (FEAT-002/FEAT-004 there), so Prowlarr and
+with the emulebb-rust Kad/eD2K indexer (RUST-FEAT-002/RUST-FEAT-004 there), so Prowlarr and
 the Arr stack treat both indexers identically and the Python tooling can read both
 uniformly.
 
@@ -56,5 +56,5 @@ columns and the Torznab dialect/caps/apikey scheme should match.
 
 ## Notes
 
-- Depends on the rust indexer surfaces (FEAT-002/FEAT-004 in emulebb-rust) landing
+- Depends on the rust indexer surfaces (RUST-FEAT-002/RUST-FEAT-004 in emulebb-rust) landing
   the canonical shape first.
