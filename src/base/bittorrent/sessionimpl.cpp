@@ -2030,7 +2030,7 @@ lt::settings_pack SessionImpl::loadLTSettings() const
         | lt::alert::status_notification
         | lt::alert::storage_notification
         | lt::alert::tracker_notification
-        | (isDHTHarvesterEnabled() ? (lt::alert::dht_notification | lt::alert::dht_operation_notification) : lt::alert_category_t());
+        | (isDHTHarvesterEnabled() ? (lt::alert::dht_notification | lt::alert::dht_operation_notification | lt::alert::connect_notification) : lt::alert_category_t());
     settingsPack.set_int(lt::settings_pack::alert_mask, alertMask);
 
     settingsPack.set_int(lt::settings_pack::connection_speed, connectionSpeed());
@@ -6095,6 +6095,7 @@ void SessionImpl::handleAlert(lt::alert *alert)
         case lt::dht_sample_infohashes_alert::alert_type:
         case lt::dht_live_nodes_alert::alert_type:
         case lt::dht_get_peers_reply_alert::alert_type:
+        case lt::peer_connect_alert::alert_type:
             if (m_dhtHarvester)
                 m_dhtHarvester->handleAlert(alert);
             break;

@@ -324,6 +324,30 @@ void DHTHarvester::handleAlert(const lt::alert *alert)
             }
         }
         break;
+    case lt::peer_connect_alert::alert_type:
+        {
+            // Seed BEP-51 sampling from the DHT nodes of peers we connect to in
+            // swarms (our own ephemeral metadata fetches and real torrents alike).
+            // A swarm peer is a live, reachable host whose DHT node stores the
+            // infohashes announced near it -> a high-quality sample target.
+            //
+            // Only outgoing connections carry the peer's real listen port (we
+            // dialed it); incoming connections expose an ephemeral source port.
+            // libtorrent doesn't surface the peer's advertised DHT (BEP-5 PORT)
+            // value, and most clients run DHT on their BT listen port, so we use
+            // that as a best-effort sample endpoint. Misses just time out silently.
+            if (!m_activeCrawl || (m_sampleBudget <= 0))
+                break;
+            const auto *a = static_cast<const lt::peer_connect_alert *>(alert);
+            if (a->direction != lt::peer_connect_alert::direction_t::out)
+                break;
+            const lt::tcp::endpoint &tep = a->endpoint;
+            if (tep.address().is_unspecified() || (tep.port() == 0))
+                break;
+            m_nativeSession->dht_sample_infohashes(lt::udp::endpoint(tep.address(), tep.port()), randomTarget());
+            --m_sampleBudget;
+        }
+        break;
     default:
         break;
     }
