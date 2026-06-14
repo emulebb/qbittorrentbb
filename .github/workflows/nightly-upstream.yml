@@ -1,0 +1,77 @@
+# Nightly upstream sync (rebase-check only).
+#
+# qBittorrentBB's master carries the fork delta rebased onto a qBittorrent
+# release tag (currently release-5.2.1). This workflow watches for a newer patch
+# tag in the same minor series (release-5.2.*) and proves the fork delta still
+# rebases cleanly onto it. It does NOT run the multi-hour C++/Qt build and never
+# touches master: a clean rebase is pushed to automation/upstream-nightly for a
+# human/local build (against emulebb-libtorrent) to validate first.
+
+name: Nightly upstream sync
+
+on:
+  schedule:
+    # UTC. Off the top-of-hour spike and the other eMuleBB nightly slots.
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Push the sync branch even when no newer tag is found.
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: qbittorrentbb-nightly-upstream
+  cancel-in-progress: false
+
+env:
+  # Patch series to track. Bump when moving the fork to a new minor (e.g. 5.3.*).
+  UPSTREAM_TAG_GLOB: "release-5.2.*"
+
+jobs:
+  rebase-check:
+    name: Check for a newer upstream patch tag and rebase the fork delta
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: master
+
+      - name: Fetch upstream tags and attempt rebase onto the latest patch
+        env:
+          FORCE: ${{ inputs.force || false }}
+        run: |
+          set -euo pipefail
+          git config user.name "eMuleBB automation"
+          git config user.email "actions@users.noreply.github.com"
+          git remote add upstream https://github.com/qbittorrent/qBittorrent.git
+          git fetch origin master
+          git fetch upstream --tags --no-recurse-submodules
+
+          # highest release-5.2.* tag by version sort
+          latest_tag="$(git tag -l "${UPSTREAM_TAG_GLOB}" --sort=-v:refname | head -1)"
+          if [[ -z "${latest_tag}" ]]; then
+              echo "No upstream tags matching ${UPSTREAM_TAG_GLOB}."
+              exit 0
+          fi
+          echo "Latest upstream tag: ${latest_tag}"
+
+          if [[ "${FORCE}" != "true" ]] && git merge-base --is-ancestor "${latest_tag}" origin/master; then
+              echo "${latest_tag} is already contained in master; nothing to rebase."
+              exit 0
+          fi
+
+          git checkout -B automation/upstream-nightly origin/master
+          # Fails the job (non-zero) on conflict, surfacing it instead of
+          # silently publishing.
+          git rebase "${latest_tag}"
+
+          git push origin HEAD:refs/heads/automation/upstream-nightly --force-with-lease
+          echo "Clean rebase onto ${latest_tag} pushed to automation/upstream-nightly."
+          echo "Rebuild against emulebb-libtorrent, run test/livewire/vpn_guard_test.py,"
+          echo "then fast-forward master to this ref and update fork-delta.json baseCommit/baseVersion."
