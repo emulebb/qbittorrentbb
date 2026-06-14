@@ -1,6 +1,7 @@
 ---
 id: FEAT-003
-workflow: local
+workflow: github
+github_issue: https://github.com/emulebb/qbittorrentbb/issues/3
 title: Indexer schema + Torznab contract parity with emulebb-rust
 status: OPEN
 priority: Minor
@@ -10,6 +11,8 @@ milestone: phase-1
 created: 2026-06-14
 source: suite forward program (notes 14-15); SUITE-JOINT-ROADMAP
 ---
+
+> Workflow status is tracked in GitHub: https://github.com/emulebb/qbittorrentbb/issues/3. This local document is retained as an engineering spec/evidence record.
 
 # FEAT-003 - Indexer schema + Torznab contract parity with emulebb-rust
 

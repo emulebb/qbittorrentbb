@@ -1,6 +1,7 @@
 ---
 id: FEAT-001
-workflow: local
+workflow: github
+github_issue: https://github.com/emulebb/qbittorrentbb/issues/1
 title: Branded idempotent export of the live torrent library to the eD2K share
 status: OPEN
 priority: Major
@@ -10,6 +11,8 @@ milestone: phase-1
 created: 2026-06-14
 source: suite forward program (note 1); BB-TORRENT-EXPORT-AND-HARVEST
 ---
+
+> Workflow status is tracked in GitHub: https://github.com/emulebb/qbittorrentbb/issues/1. This local document is retained as an engineering spec/evidence record.
 
 # FEAT-001 - Branded idempotent export of the live torrent library to the eD2K share
 

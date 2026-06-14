@@ -1,6 +1,7 @@
 ---
 id: FEAT-002
-workflow: local
+workflow: github
+github_issue: https://github.com/emulebb/qbittorrentbb/issues/2
 title: Persist harvested torrents to a sharded local on-disk store
 status: OPEN
 priority: Major
@@ -10,6 +11,8 @@ milestone: phase-1
 created: 2026-06-14
 source: suite forward program (note 3); BB-TORRENT-EXPORT-AND-HARVEST
 ---
+
+> Workflow status is tracked in GitHub: https://github.com/emulebb/qbittorrentbb/issues/2. This local document is retained as an engineering spec/evidence record.
 
 # FEAT-002 - Persist harvested torrents to a sharded local on-disk store
 
