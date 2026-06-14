@@ -41,3 +41,6 @@ src/icons/skin/build-icons/icons/*.png
 
 # CMake build directory
 build/
+
+# Live-wire test data (private VPN ranges / machine-local paths) -- never commit
+/test/livewire/*.json
