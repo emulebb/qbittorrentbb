@@ -141,7 +141,12 @@ QByteArray TorznabController::buildResults() const
     for (const BitTorrent::HarvestSearchResult &result : results)
     {
         const QString magnet = magnetFor(result.infoHashV1, result.name);
-        const QString seeders = QString::number(result.sightings);
+        // Prefer the real DHT swarm size (peers from a get_peers reply); fall back
+        // to the sighting count as a popularity proxy until a swarm reading lands.
+        // DHT can't distinguish seeders from leechers, so report the swarm size for
+        // both — better signal for *Arr ranking than a flat zero.
+        const int swarm = (result.peers > 0) ? result.peers : result.sightings;
+        const QString swarmCount = QString::number(swarm);
 
         xml.writeStartElement(u"item"_s);
         xml.writeTextElement(u"title"_s, result.name);
@@ -166,10 +171,8 @@ QByteArray TorznabController::buildResults() const
         writeTorznabAttr(xml, u"size"_s, QString::number(result.size));
         writeTorznabAttr(xml, u"infohash"_s, result.infoHashV1);
         writeTorznabAttr(xml, u"magneturl"_s, magnet);
-        // We have no real swarm counts; expose the DHT sighting count as a
-        // popularity proxy so *Arr ranking has a signal.
-        writeTorznabAttr(xml, u"seeders"_s, seeders);
-        writeTorznabAttr(xml, u"peers"_s, seeders);
+        writeTorznabAttr(xml, u"seeders"_s, swarmCount);
+        writeTorznabAttr(xml, u"peers"_s, swarmCount);
 
         xml.writeEndElement();  // item
     }
