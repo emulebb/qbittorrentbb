@@ -72,6 +72,33 @@ namespace
     const int SEARCH_LIMIT = 500;
     const int FEED_LIMIT = 200;  // capped live feed of most-recent indexed torrents
 
+    // Table item that sorts by an underlying numeric value while displaying a
+    // formatted string (size/files/sightings/date).
+    class NumericItem final : public QTableWidgetItem
+    {
+    public:
+        NumericItem(const qlonglong value, const QString &text)
+            : QTableWidgetItem(text)
+            , m_value {value}
+        {
+        }
+
+        bool operator<(const QTableWidgetItem &other) const override
+        {
+            if (const auto *o = dynamic_cast<const NumericItem *>(&other))
+                return m_value < o->m_value;
+            return QTableWidgetItem::operator<(other);
+        }
+
+        QTableWidgetItem *clone() const override
+        {
+            return new NumericItem(m_value, text());
+        }
+
+    private:
+        qlonglong m_value = 0;
+    };
+
     // Reconstruct a torrent descriptor from a stored bencoded info-dict by wrapping
     // it back into a minimal torrent ("d4:info<info-dict>e").
     std::optional<BitTorrent::TorrentDescriptor> descriptorFromMetadata(const QByteArray &infoDict)
@@ -122,7 +149,17 @@ DHTIndexWidget::DHTIndexWidget(QWidget *parent)
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
     m_table->verticalHeader()->setVisible(false);
-    m_table->horizontalHeader()->setSectionResizeMode(COL_NAME, QHeaderView::Stretch);
+    m_table->setSortingEnabled(true);
+    m_table->sortByColumn(COL_SIGHTINGS, Qt::DescendingOrder);
+    QHeaderView *header = m_table->horizontalHeader();
+    header->setSectionResizeMode(QHeaderView::Interactive);  // user-resizable columns
+    header->setSectionsMovable(true);
+    header->setStretchLastSection(false);
+    m_table->setColumnWidth(COL_NAME, 380);
+    m_table->setColumnWidth(COL_SIZE, 90);
+    m_table->setColumnWidth(COL_FILES, 60);
+    m_table->setColumnWidth(COL_SIGHTINGS, 80);
+    m_table->setColumnWidth(COL_LASTSEEN, 130);
     connect(m_table, &QWidget::customContextMenuRequested, this, &DHTIndexWidget::showContextMenu);
     connect(m_table, &QTableWidget::itemSelectionChanged, this, &DHTIndexWidget::onSelectionChanged);
 
@@ -186,26 +223,37 @@ void DHTIndexWidget::setRows(const QList<BitTorrent::HarvestSearchResult> &resul
     // Preserve the current selection across refreshes of the live feed.
     const QString selected = selectedInfoHash();
 
+    // Repopulate with sorting off, then restore it so the user's chosen sort
+    // column/order is reapplied to the new data.
+    m_table->setSortingEnabled(false);
     m_table->setRowCount(results.size());
     int row = 0;
-    int selectedRow = -1;
     for (const BitTorrent::HarvestSearchResult &result : results)
     {
         auto *nameItem = new QTableWidgetItem(result.name);
         nameItem->setData(Qt::UserRole, result.infoHashV1);
         m_table->setItem(row, COL_NAME, nameItem);
-        m_table->setItem(row, COL_SIZE, new QTableWidgetItem(Utils::Misc::friendlyUnit(result.size)));
-        m_table->setItem(row, COL_FILES, new QTableWidgetItem(QString::number(result.fileCount)));
-        m_table->setItem(row, COL_SIGHTINGS, new QTableWidgetItem(QString::number(result.sightings)));
-        m_table->setItem(row, COL_LASTSEEN, new QTableWidgetItem(
-                QDateTime::fromMSecsSinceEpoch(result.lastSeenMs).toString(u"yyyy-MM-dd hh:mm"_s)));
-        if (!selected.isEmpty() && (result.infoHashV1 == selected))
-            selectedRow = row;
+        m_table->setItem(row, COL_SIZE, new NumericItem(result.size, Utils::Misc::friendlyUnit(result.size)));
+        m_table->setItem(row, COL_FILES, new NumericItem(result.fileCount, QString::number(result.fileCount)));
+        m_table->setItem(row, COL_SIGHTINGS, new NumericItem(result.sightings, QString::number(result.sightings)));
+        m_table->setItem(row, COL_LASTSEEN, new NumericItem(result.lastSeenMs
+                , QDateTime::fromMSecsSinceEpoch(result.lastSeenMs).toString(u"yyyy-MM-dd hh:mm"_s)));
         ++row;
     }
+    m_table->setSortingEnabled(true);
 
-    if (selectedRow >= 0)
-        m_table->selectRow(selectedRow);
+    if (!selected.isEmpty())
+    {
+        for (int r = 0; r < m_table->rowCount(); ++r)
+        {
+            const QTableWidgetItem *item = m_table->item(r, COL_NAME);
+            if (item && (item->data(Qt::UserRole).toString() == selected))
+            {
+                m_table->selectRow(r);
+                break;
+            }
+        }
+    }
 }
 
 void DHTIndexWidget::onSelectionChanged()
