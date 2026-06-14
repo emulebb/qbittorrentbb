@@ -96,7 +96,3 @@ void HarvestContentHandler::prioritizeFiles(const QList<BitTorrent::DownloadPrio
 void HarvestContentHandler::flushCache() const
 {
 }
-
-void HarvestContentHandler::doRenameFolder(const Path &, const Path &)
-{
-}

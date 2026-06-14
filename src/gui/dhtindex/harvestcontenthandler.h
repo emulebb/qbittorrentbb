@@ -56,7 +56,5 @@ public:
     void flushCache() const override;
 
 private:
-    void doRenameFolder(const Path &oldFolderPath, const Path &newFolderPath) override;
-
     const BitTorrent::TorrentInfo m_torrentInfo;
 };
