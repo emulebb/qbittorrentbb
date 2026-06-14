@@ -88,6 +88,12 @@ namespace BitTorrent
         qint64 sightingCount = 0;    // total sighting rows
     };
 
+    struct HarvestPruneStats
+    {
+        qint64 torrentsPruned = 0;   // metadata-less / exhausted / over-cap rows removed
+        qint64 sightingsPruned = 0;  // stale sighting rows removed
+    };
+
     // Local SQLite index of torrents harvested from the BitTorrent DHT.
     //
     // The store mirrors the emulebb-rust metadata conventions (WAL, FTS5 over
@@ -126,6 +132,17 @@ namespace BitTorrent
         QByteArray metadataFor(const QString &infoHashV1) const;
         BitTorrent::HarvestStats stats() const;
 
+        // Persistent metadata-fetch queue: infohashes still lacking metadata that
+        // are not in fetch-backoff, most promising first (availability then
+        // recency). Drives coverage across sessions, unlike the in-memory
+        // per-session popularity gate.
+        QList<QString> candidatesForMetadata(int limit) const;
+
+        // Retention: drop metadata-less torrents that are fetch-exhausted and not
+        // seen within staleAgeMs, prune sightings older than sightingRetentionMs,
+        // and cap the table at maxTorrents (oldest metadata-less first).
+        BitTorrent::HarvestPruneStats prune(qint64 staleAgeMs, qint64 sightingRetentionMs, qint64 maxTorrents);
+
     private:
         void openDatabase();
         void ensureSchema();
@@ -140,3 +157,4 @@ Q_DECLARE_METATYPE(BitTorrent::HarvestSighting)
 Q_DECLARE_METATYPE(BitTorrent::HarvestedTorrent)
 Q_DECLARE_METATYPE(BitTorrent::HarvestSearchResult)
 Q_DECLARE_METATYPE(BitTorrent::HarvestStats)
+Q_DECLARE_METATYPE(BitTorrent::HarvestPruneStats)
