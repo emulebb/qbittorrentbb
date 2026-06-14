@@ -77,6 +77,7 @@ namespace BitTorrent
         qint64 firstSeenMs = 0;
         qint64 lastSeenMs = 0;
         int sightings = 0;
+        int peers = 0;            // last observed DHT swarm size (get_peers reply)
         bool metadataFetched = false;
     };
 
@@ -116,6 +117,8 @@ namespace BitTorrent
         void recordSighting(const BitTorrent::HarvestSighting &sighting);
         void recordMetadata(const BitTorrent::HarvestedTorrent &torrent);
         void noteFetchFailure(const QString &infoHashV1);
+        // Records the real DHT swarm size (peer count from a get_peers reply).
+        void updateSwarm(const QString &infoHashV1, int peers);
 
         // Readers (may be invoked via BlockingQueuedConnection from the GUI).
         QList<BitTorrent::HarvestSearchResult> search(const QString &query, int limit) const;

@@ -44,7 +44,7 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace
 {
-    const int DB_VERSION = 2;
+    const int DB_VERSION = 3;
 
     // Fetch-backoff policy for metadata acquisition.
     const int MAX_FETCH_ATTEMPTS = 5;
@@ -205,6 +205,8 @@ void HarvestStore::createSchema()
              u"fetch_attempts INTEGER NOT NULL DEFAULT 0,"
              u"last_attempt_ms INTEGER NOT NULL DEFAULT 0,"
              u"availability_score INTEGER NOT NULL DEFAULT 0,"
+             u"swarm_peers INTEGER NOT NULL DEFAULT 0,"
+             u"swarm_seen_ms INTEGER NOT NULL DEFAULT 0,"
              u"first_seen_ms INTEGER NOT NULL,"
              u"last_seen_ms INTEGER NOT NULL,"
              u"updated_at_ms INTEGER NOT NULL);"_s);
@@ -373,6 +375,24 @@ void HarvestStore::noteFetchFailure(const QString &infoHashV1)
     query.exec();
 }
 
+void HarvestStore::updateSwarm(const QString &infoHashV1, int peers)
+{
+    if (infoHashV1.isEmpty() || (peers < 0))
+        return;
+
+    const qint64 now = nowMs();
+    auto db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery query {db};
+    // Only update an already-known torrent; we don't create a row just for a
+    // swarm reading (a sighting/metadata event is what introduces the torrent).
+    query.prepare(u"UPDATE torrents SET swarm_peers = :peers, swarm_seen_ms = :now,"
+                  u" updated_at_ms = :now WHERE infohash_v1 = :ih;"_s);
+    query.bindValue(u":peers"_s, peers);
+    query.bindValue(u":now"_s, now);
+    query.bindValue(u":ih"_s, infoHashV1);
+    query.exec();
+}
+
 bool HarvestStore::needsMetadata(const QString &infoHashV1) const
 {
     if (infoHashV1.isEmpty())
@@ -414,7 +434,7 @@ QList<HarvestSearchResult> HarvestStore::search(const QString &queryText, int li
     auto db = QSqlDatabase::database(m_connectionName);
     QSqlQuery query {db};
     query.prepare(u"SELECT t.infohash_v1, t.name, t.size_bytes, t.file_count,"
-                  u" t.first_seen_ms, t.last_seen_ms, t.metadata_fetched,"
+                  u" t.first_seen_ms, t.last_seen_ms, t.metadata_fetched, t.swarm_peers,"
                   u" (SELECT count(*) FROM infohash_sightings s WHERE s.infohash_v1 = t.infohash_v1)"
                   u" FROM torrent_name_fts f"
                   u" JOIN torrents t ON t.id = f.rowid"
@@ -439,7 +459,8 @@ QList<HarvestSearchResult> HarvestStore::search(const QString &queryText, int li
         row.firstSeenMs = query.value(4).toLongLong();
         row.lastSeenMs = query.value(5).toLongLong();
         row.metadataFetched = (query.value(6).toInt() != 0);
-        row.sightings = query.value(7).toInt();
+        row.peers = query.value(7).toInt();
+        row.sightings = query.value(8).toInt();
         results.append(row);
     }
 
@@ -453,7 +474,7 @@ QList<HarvestSearchResult> HarvestStore::recent(int limit) const
     auto db = QSqlDatabase::database(m_connectionName);
     QSqlQuery query {db};
     query.prepare(u"SELECT t.infohash_v1, t.name, t.size_bytes, t.file_count,"
-                  u" t.first_seen_ms, t.last_seen_ms, t.metadata_fetched,"
+                  u" t.first_seen_ms, t.last_seen_ms, t.metadata_fetched, t.swarm_peers,"
                   u" (SELECT count(*) FROM infohash_sightings s WHERE s.infohash_v1 = t.infohash_v1)"
                   u" FROM torrents t"
                   u" WHERE t.metadata_fetched = 1"
@@ -473,7 +494,8 @@ QList<HarvestSearchResult> HarvestStore::recent(int limit) const
         row.firstSeenMs = query.value(4).toLongLong();
         row.lastSeenMs = query.value(5).toLongLong();
         row.metadataFetched = (query.value(6).toInt() != 0);
-        row.sightings = query.value(7).toInt();
+        row.peers = query.value(7).toInt();
+        row.sightings = query.value(8).toInt();
         results.append(row);
     }
 
