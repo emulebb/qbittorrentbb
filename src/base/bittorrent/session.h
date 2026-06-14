@@ -225,6 +225,21 @@ namespace BitTorrent
         virtual void setDHTHarvesterActiveCrawlEnabled(bool enabled) = 0;
         virtual int DHTHarvesterMaxConcurrentMetadata() const = 0;
         virtual void setDHTHarvesterMaxConcurrentMetadata(int value) = 0;
+        // Auto-ban (ported from qBittorrent Enhanced Edition). Bans apply to
+        // upload only; the DHT harvester is exempt. Country lists use ISO 3166-1
+        // alpha-2 codes resolved live via GeoIP.
+        virtual bool isAutoBanUnknownPeerEnabled() const = 0;
+        virtual void setAutoBanUnknownPeerEnabled(bool value) = 0;
+        virtual bool isAutoBanBTPlayerPeerEnabled() const = 0;
+        virtual void setAutoBanBTPlayerPeerEnabled(bool value) = 0;
+        virtual bool isShadowBanEnabled() const = 0;
+        virtual void setShadowBanEnabled(bool value) = 0;
+        virtual bool isAutoBanUnknownEverywhereEnabled() const = 0;
+        virtual void setAutoBanUnknownEverywhereEnabled(bool value) = 0;
+        virtual QStringList autoBanUnknownCountries() const = 0;
+        virtual void setAutoBanUnknownCountries(const QStringList &countries) = 0;
+        virtual QStringList autoBanBlockedCountries() const = 0;
+        virtual void setAutoBanBlockedCountries(const QStringList &countries) = 0;
         virtual QList<HarvestSearchResult> searchDHTIndex(const QString &query, int limit) const = 0;
         virtual QList<HarvestSearchResult> recentDHTIndex(int limit) const = 0;
         virtual QByteArray dhtTorrentMetadata(const QString &infoHashV1) const = 0;

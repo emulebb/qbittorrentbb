@@ -106,6 +106,9 @@
 #include "loadtorrentparams.h"
 #include "lttypecast.h"
 #include "nativesessionextension.h"
+#include "peer_blacklist.hpp"
+#include "peer_filter_session_plugin.hpp"
+#include "peer_shadowban_plugin.hpp"
 #include "portforwarderimpl.h"
 #include "resumedatastorage.h"
 #include "torrentcontentremover.h"
@@ -448,6 +451,12 @@ SessionImpl::SessionImpl(QObject *parent)
     , m_isDHTHarvesterEnabled(BITTORRENT_SESSION_KEY(u"DHTHarvesterEnabled"_s), false)
     , m_isDHTHarvesterActiveCrawlEnabled(BITTORRENT_SESSION_KEY(u"DHTHarvesterActiveCrawl"_s), true)
     , m_dhtHarvesterMaxConcurrentMetadata(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxConcurrentMetadata"_s), 100)
+    , m_isAutoBanUnknownPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanUnknownPeer"_s), false)
+    , m_isAutoBanBTPlayerPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanBTPlayerPeer"_s), false)
+    , m_isShadowBanEnabled(BITTORRENT_SESSION_KEY(u"ShadowBan"_s), false)
+    , m_isAutoBanUnknownEverywhereEnabled(BITTORRENT_SESSION_KEY(u"AutoBanUnknownEverywhere"_s), false)
+    , m_autoBanUnknownCountries(BITTORRENT_SESSION_KEY(u"AutoBanUnknownCountries"_s))
+    , m_autoBanBlockedCountries(BITTORRENT_SESSION_KEY(u"AutoBanBlockedCountries"_s))
     , m_isIPFilteringEnabled(BITTORRENT_SESSION_KEY(u"IPFilteringEnabled"_s), false)
     , m_isTrackerFilteringEnabled(BITTORRENT_SESSION_KEY(u"TrackerFilteringEnabled"_s), false)
     , m_IPFilterFile(BITTORRENT_SESSION_KEY(u"IPFilter"_s))
@@ -861,6 +870,89 @@ void SessionImpl::setDHTHarvesterMaxConcurrentMetadata(const int value)
     m_dhtHarvesterMaxConcurrentMetadata = value;
     if (m_dhtHarvester)
         m_dhtHarvester->setMaxConcurrentMetadata(value);
+}
+
+// Auto-ban settings. Changes take effect on the next session restart, since the
+// libtorrent peer-filter plugins are registered once at session construction.
+bool SessionImpl::isAutoBanUnknownPeerEnabled() const
+{
+    return m_isAutoBanUnknownPeerEnabled;
+}
+
+void SessionImpl::setAutoBanUnknownPeerEnabled(const bool value)
+{
+    if (value == m_isAutoBanUnknownPeerEnabled)
+        return;
+
+    m_isAutoBanUnknownPeerEnabled = value;
+}
+
+bool SessionImpl::isAutoBanBTPlayerPeerEnabled() const
+{
+    return m_isAutoBanBTPlayerPeerEnabled;
+}
+
+void SessionImpl::setAutoBanBTPlayerPeerEnabled(const bool value)
+{
+    if (value == m_isAutoBanBTPlayerPeerEnabled)
+        return;
+
+    m_isAutoBanBTPlayerPeerEnabled = value;
+}
+
+bool SessionImpl::isShadowBanEnabled() const
+{
+    return m_isShadowBanEnabled;
+}
+
+void SessionImpl::setShadowBanEnabled(const bool value)
+{
+    if (value == m_isShadowBanEnabled)
+        return;
+
+    m_isShadowBanEnabled = value;
+}
+
+bool SessionImpl::isAutoBanUnknownEverywhereEnabled() const
+{
+    return m_isAutoBanUnknownEverywhereEnabled;
+}
+
+void SessionImpl::setAutoBanUnknownEverywhereEnabled(const bool value)
+{
+    if (value == m_isAutoBanUnknownEverywhereEnabled)
+        return;
+
+    m_isAutoBanUnknownEverywhereEnabled = value;
+    g_autoBanPolicy.unknownEverywhere = value;
+}
+
+QStringList SessionImpl::autoBanUnknownCountries() const
+{
+    return m_autoBanUnknownCountries;
+}
+
+void SessionImpl::setAutoBanUnknownCountries(const QStringList &countries)
+{
+    if (countries == m_autoBanUnknownCountries)
+        return;
+
+    m_autoBanUnknownCountries = countries;
+    g_autoBanPolicy.unknownCountries = countries;
+}
+
+QStringList SessionImpl::autoBanBlockedCountries() const
+{
+    return m_autoBanBlockedCountries;
+}
+
+void SessionImpl::setAutoBanBlockedCountries(const QStringList &countries)
+{
+    if (countries == m_autoBanBlockedCountries)
+        return;
+
+    m_autoBanBlockedCountries = countries;
+    g_autoBanPolicy.blockedCountries = countries;
 }
 
 QList<HarvestSearchResult> SessionImpl::searchDHTIndex(const QString &query, const int limit) const
@@ -1939,6 +2031,30 @@ void SessionImpl::initializeNativeSession()
     m_nativeSession->add_extension(&lt::create_ut_metadata_plugin);
     if (isPeXEnabled())
         m_nativeSession->add_extension(&lt::create_ut_pex_plugin);
+
+    // qBittorrentBB auto-ban (ported from qBittorrent Enhanced Edition).
+    // Bans apply to UPLOAD only and are evaluated per session via libtorrent
+    // peer-filter plugins; the DHT harvester (upload_mode torrents) is exempt.
+    // Refresh the shared policy from settings before registering the plugins.
+    g_autoBanPolicy.blockedCountries = autoBanBlockedCountries();
+    g_autoBanPolicy.unknownCountries = autoBanUnknownCountries();
+    g_autoBanPolicy.unknownEverywhere = isAutoBanUnknownEverywhereEnabled();
+
+    // Always drop notoriously abusive clients (leechers / fake clients).
+    m_nativeSession->add_extension(&create_drop_bad_peers_plugin);
+    if (isAutoBanUnknownPeerEnabled())
+    {
+        m_nativeSession->add_extension(&create_drop_unknown_peers_plugin);
+        m_nativeSession->add_extension(&create_drop_offline_downloader_plugin);
+    }
+    if (isAutoBanBTPlayerPeerEnabled())
+        m_nativeSession->add_extension(&create_drop_bittorrent_media_player_plugin);
+    if (!g_autoBanPolicy.blockedCountries.isEmpty())
+        m_nativeSession->add_extension(&create_drop_blocked_country_plugin);
+    // User-defined peer_blacklist.txt / peer_whitelist.txt rules.
+    m_nativeSession->add_extension(std::make_shared<peer_filter_session_plugin>());
+    if (isShadowBanEnabled())
+        m_nativeSession->add_extension(&create_peer_shadowban_plugin);
 
     auto nativeSessionExtension = std::make_shared<NativeSessionExtension>();
     m_nativeSession->add_extension(nativeSessionExtension);
