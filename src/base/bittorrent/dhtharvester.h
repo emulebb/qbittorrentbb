@@ -80,6 +80,11 @@ namespace BitTorrent
         // blocking-queued invocation.
         HarvestStore *store() const;
 
+    signals:
+        // Emitted (main thread) when a newly discovered torrent's metadata has
+        // been fetched and indexed.
+        void torrentIndexed(const QString &infoHashV1, const QString &name);
+
     private slots:
         void onMetadataDownloaded(const BitTorrent::TorrentInfo &info);
         void onSampleTimer();

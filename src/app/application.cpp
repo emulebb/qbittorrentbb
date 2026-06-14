@@ -919,6 +919,12 @@ int Application::exec()
         new RSS::Session; // create RSS::Session singleton
         new RSS::AutoDownloader(this); // create RSS::AutoDownloader singleton
 
+        // Surface BitTorrent DHT harvester findings as articles of the built-in
+        // "DHT Index" RSS feed, so they flow through the RSS auto-download rules
+        // exactly like any other feed's articles.
+        connect(BitTorrent::Session::instance(), &BitTorrent::Session::dhtTorrentIndexed
+                , RSS::Session::instance(), &RSS::Session::addDHTFinding);
+
 #ifndef DISABLE_GUI
         const auto *btSession = BitTorrent::Session::instance();
         connect(btSession, &BitTorrent::Session::fullDiskError, this

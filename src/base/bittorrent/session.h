@@ -508,6 +508,7 @@ namespace BitTorrent
         void fullDiskError(Torrent *torrent, const QString &msg);
         void IPFilterParsed(bool error, int ruleCount);
         void metadataDownloaded(const TorrentInfo &info);
+        void dhtTorrentIndexed(const QString &infoHashV1, const QString &name);
         void restored();
         void paused();
         void resumed();
