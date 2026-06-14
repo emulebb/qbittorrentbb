@@ -439,5 +439,7 @@ void DHTHarvester::onMetadataDownloaded(const TorrentInfo &info)
         QMetaObject::invokeMethod(m_store, [store = m_store, torrent] { store->recordMetadata(torrent); }, Qt::QueuedConnection);
     }
 
+    emit torrentIndexed(v1, torrent.name);
+
     pump();
 }

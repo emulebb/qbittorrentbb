@@ -1916,6 +1916,7 @@ void SessionImpl::initializeNativeSession()
     // a local SQLite index. Disabled by default; requires VPN-bound egress.
     const Path harvestDBPath = specialFolderLocation(SpecialFolder::Data) / Path(u"dht_index.db"_s);
     m_dhtHarvester = new DHTHarvester(this, m_nativeSession, harvestDBPath);
+    connect(m_dhtHarvester, &DHTHarvester::torrentIndexed, this, &Session::dhtTorrentIndexed);
     m_dhtHarvester->setActiveCrawlEnabled(isDHTHarvesterActiveCrawlEnabled());
     m_dhtHarvester->setMaxConcurrentMetadata(DHTHarvesterMaxConcurrentMetadata());
     m_dhtHarvester->setEnabled(isDHTHarvesterEnabled());
