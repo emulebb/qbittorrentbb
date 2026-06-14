@@ -68,6 +68,7 @@
 #include "api/synccontroller.h"
 #include "api/torrentcreatorcontroller.h"
 #include "api/torrentscontroller.h"
+#include "api/torznabcontroller.h"
 #include "api/transfercontroller.h"
 #include "clientdatastorage.h"
 
@@ -322,6 +323,21 @@ void WebApplication::doProcessRequest(const bool isUsingApiKey)
 
     const QString action = match.captured(u"action"_s);
     const QString scope = match.captured(u"scope"_s);
+
+    // The Torznab indexer endpoint also authenticates via an `apikey` query
+    // parameter (what Prowlarr sends), in addition to the standard Bearer key.
+    if (!session() && (scope == u"torznab"_s) && !m_apiKey.isEmpty())
+    {
+        const QString providedKey = m_params.value(u"apikey"_s);
+        if (!providedKey.isEmpty() && Utils::Password::slowEquals(providedKey.toUtf8(), m_apiKey.toUtf8()))
+        {
+            m_currentSession = m_sessions.value(providedKey);
+            if (m_currentSession)
+                m_currentSession->updateTimestamp();
+            else
+                sessionStartImpl(providedKey, false);  // stateless, no cookie
+        }
+    }
 
     // Check public/private scope
     if (!session() && !isPublicAPI(scope, action))
@@ -844,6 +860,7 @@ void WebApplication::sessionStartImpl(const QString &sessionId, const bool useCo
     m_currentSession->registerAPIController(u"search"_s, new SearchController(app(), m_currentSession));
     m_currentSession->registerAPIController(u"torrents"_s, new TorrentsController(app(), m_currentSession));
     m_currentSession->registerAPIController(u"transfer"_s, new TransferController(app(), m_currentSession));
+    m_currentSession->registerAPIController(u"torznab"_s, new TorznabController(app(), m_currentSession));
 
     const auto *btSession = BitTorrent::Session::instance();
     auto *syncController = new SyncController(app(), m_currentSession);
