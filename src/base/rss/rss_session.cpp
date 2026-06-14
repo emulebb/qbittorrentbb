@@ -33,6 +33,7 @@
 
 #include <chrono>
 
+#include <QDateTime>
 #include <QDebug>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -99,6 +100,11 @@ Session::Session()
     connect(&m_refreshTimer, &QTimer::timeout, this, &Session::refresh);
     if (isProcessingEnabled())
         refresh();
+
+    // Debounce DHT findings: collect them and flush in one batch per interval.
+    m_dhtFindingsTimer.setSingleShot(true);
+    m_dhtFindingsTimer.setInterval(std::chrono::seconds(5));
+    connect(&m_dhtFindingsTimer, &QTimer::timeout, this, &Session::flushDHTFindings);
 
     // Remove legacy/corrupted settings
     // (at least on Windows, QSettings is case-insensitive and it can get
@@ -542,6 +548,60 @@ QList<Feed *> Session::feeds() const
 Feed *Session::feedByURL(const QString &url) const
 {
     return m_feedsByURL.value(url);
+}
+
+QString Session::dhtIndexFeedURL()
+{
+    return u"qbt://dht-index"_s;
+}
+
+void Session::addDHTFinding(const QString &infoHashV1, const QString &name)
+{
+    if (infoHashV1.isEmpty())
+        return;
+
+    // Buffer and debounce: many findings can arrive in bursts; collect them
+    // (deduped by infohash) and push them into the feed in one batch per
+    // interval to avoid flooding the RSS pipeline.
+    m_pendingDHTFindings.insert(infoHashV1, name);
+    if (!m_dhtFindingsTimer.isActive())
+        m_dhtFindingsTimer.start();
+}
+
+void Session::flushDHTFindings()
+{
+    if (m_pendingDHTFindings.isEmpty())
+        return;
+
+    const QHash<QString, QString> batch = m_pendingDHTFindings;
+    m_pendingDHTFindings.clear();
+
+    Feed *feed = feedByURL(dhtIndexFeedURL());
+    if (!feed)
+    {
+        // Lazily create the built-in DHT Index feed (also self-heals if the user
+        // deleted it). It is a normal feed with a local qbt:// URL that is never
+        // fetched (see Feed::refresh()).
+        const auto result = addFeed(dhtIndexFeedURL(), u"DHT Index"_s);
+        if (!result)
+            return;
+        feed = result.value();
+    }
+
+    const QDateTime now = QDateTime::currentDateTime();
+    for (auto it = batch.cbegin(); it != batch.cend(); ++it)
+    {
+        const QString &infoHashV1 = it.key();
+        if (feed->articleByGUID(infoHashV1))
+            continue;  // already indexed (Feed::addArticle asserts on duplicate GUID)
+
+        QVariantHash data;
+        data[Article::KeyId] = infoHashV1;
+        data[Article::KeyTitle] = it.value();
+        data[Article::KeyTorrentURL] = QString(u"magnet:?xt=urn:btih:"_s + infoHashV1);
+        data[Article::KeyDate] = now;
+        feed->addArticle(data);  // Feed::addArticle already trims to the configured cap
+    }
 }
 
 int Session::refreshInterval() const

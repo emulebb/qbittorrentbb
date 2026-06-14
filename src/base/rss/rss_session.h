@@ -127,6 +127,13 @@ namespace RSS
         QList<Feed *> feeds() const;
         Feed *feedByURL(const QString &url) const;
 
+        // The built-in, locally-fed "DHT Index" feed: a real RSS feed whose
+        // articles are pushed in code (not fetched) when the BitTorrent DHT
+        // crawler indexes a torrent. Lets DHT findings flow through the normal
+        // RSS pipeline (tree, auto-download rules) with the same semantics.
+        static QString dhtIndexFeedURL();
+        void addDHTFinding(const QString &infoHashV1, const QString &name);
+
         Folder *rootFolder() const;
 
     signals:
@@ -142,6 +149,7 @@ namespace RSS
     private slots:
         void handleItemAboutToBeDestroyed(Item *item);
         void handleFeedTitleChanged(Feed *feed);
+        void flushDHTFindings();
 
     private:
         QUuid generateUID() const;
@@ -166,6 +174,10 @@ namespace RSS
         AsyncFileStorage *m_confFileStorage = nullptr;
         AsyncFileStorage *m_dataFileStorage = nullptr;
         QTimer m_refreshTimer;
+        // Debounce/batch DHT crawler findings before pushing them into the
+        // built-in "DHT Index" feed (infohash -> name; deduped while pending).
+        QHash<QString, QString> m_pendingDHTFindings;
+        QTimer m_dhtFindingsTimer;
         QHash<QString, Item *> m_itemsByPath;
         QHash<QUuid, Feed *> m_feedsByUID;
         QHash<QString, Feed *> m_feedsByURL;
