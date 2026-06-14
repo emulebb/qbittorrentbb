@@ -762,6 +762,10 @@ namespace BitTorrent
         CachedSettingValue<QString> m_networkInterface;
         CachedSettingValue<QString> m_networkInterfaceName;
         CachedSettingValue<QString> m_networkInterfaceAddress;
+        // VPN egress guard (libtorrent settings_pack::vpn_guard_*): empty = off.
+        CachedSettingValue<QString> m_vpnGuardStunServer;
+        CachedSettingValue<QString> m_vpnGuardForbiddenAddress;
+        CachedSettingValue<QString> m_vpnGuardHttpEcho;
         CachedSettingValue<int> m_encryption;
         CachedSettingValue<int> m_maxActiveCheckingTorrents;
         CachedSettingValue<bool> m_isProxyPeerConnectionsEnabled;

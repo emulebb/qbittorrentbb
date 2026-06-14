@@ -547,6 +547,9 @@ SessionImpl::SessionImpl(QObject *parent)
     , m_networkInterface(BITTORRENT_SESSION_KEY(u"Interface"_s))
     , m_networkInterfaceName(BITTORRENT_SESSION_KEY(u"InterfaceName"_s))
     , m_networkInterfaceAddress(BITTORRENT_SESSION_KEY(u"InterfaceAddress"_s))
+    , m_vpnGuardStunServer(BITTORRENT_SESSION_KEY(u"VPNGuardStunServer"_s))
+    , m_vpnGuardForbiddenAddress(BITTORRENT_SESSION_KEY(u"VPNGuardForbiddenAddress"_s))
+    , m_vpnGuardHttpEcho(BITTORRENT_SESSION_KEY(u"VPNGuardHttpEcho"_s))
     , m_encryption(BITTORRENT_SESSION_KEY(u"Encryption"_s), 0)
     , m_maxActiveCheckingTorrents(BITTORRENT_SESSION_KEY(u"MaxActiveCheckingTorrents"_s), 1)
     , m_isProxyPeerConnectionsEnabled(BITTORRENT_SESSION_KEY(u"ProxyPeerConnections"_s), false)
@@ -2032,6 +2035,13 @@ lt::settings_pack SessionImpl::loadLTSettings() const
         | lt::alert::tracker_notification
         | (isDHTHarvesterEnabled() ? (lt::alert::dht_notification | lt::alert::dht_operation_notification | lt::alert::connect_notification) : lt::alert_category_t());
     settingsPack.set_int(lt::settings_pack::alert_mask, alertMask);
+
+    // VPN egress guard: verify the bound socket's real public IP via STUN/HTTP
+    // and fail closed (pause all P2P) if it falls in the forbidden set. Driven
+    // by INI keys BitTorrent\Session\VPNGuard* (empty = disabled).
+    settingsPack.set_str(lt::settings_pack::vpn_guard_stun_server, m_vpnGuardStunServer.get().toStdString());
+    settingsPack.set_str(lt::settings_pack::vpn_guard_forbidden_address, m_vpnGuardForbiddenAddress.get().toStdString());
+    settingsPack.set_str(lt::settings_pack::vpn_guard_http_echo, m_vpnGuardHttpEcho.get().toStdString());
 
     settingsPack.set_int(lt::settings_pack::connection_speed, connectionSpeed());
 
@@ -6084,6 +6094,21 @@ void SessionImpl::handleAlert(lt::alert *alert)
             break;
         case lt::i2p_alert::alert_type:
             handleI2PAlert(static_cast<const lt::i2p_alert *>(alert));
+            break;
+        case lt::vpn_leak_alert::alert_type:
+            {
+                const auto *a = static_cast<const lt::vpn_leak_alert *>(alert);
+                LogMsg(tr("VPN egress leak detected: observed public address %1 is in the forbidden set."
+                          " All BitTorrent activity has been paused (fail-closed).")
+                        .arg(QString::fromStdString(a->observed_address.to_string())), Log::CRITICAL);
+            }
+            break;
+        case lt::vpn_external_address_alert::alert_type:
+            {
+                const auto *a = static_cast<const lt::vpn_external_address_alert *>(alert);
+                LogMsg(tr("VPN guard: observed public egress address %1.")
+                        .arg(QString::fromStdString(a->external_address.to_string())), Log::INFO);
+            }
             break;
 #ifdef QBT_USES_LIBTORRENT2
         case lt::torrent_conflict_alert::alert_type:
