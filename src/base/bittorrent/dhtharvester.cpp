@@ -63,9 +63,12 @@ namespace
     const int SAMPLE_BUDGET_PER_TICK = 48;
     const int RECURSE_NODES_PER_SAMPLE = 3;
 
-    // Metadata-fetch timeout housekeeping.
+    // Metadata-fetch timeout housekeeping. Most DHT-sniffed infohashes have no
+    // reachable peer (get_peers = someone *asking*, not *having*), so they hold a
+    // fetch slot until timeout; a peer that does have it exchanges the small
+    // info-dict within seconds, so a shorter timeout mainly frees dead slots.
     const int TIMEOUT_SWEEP_MS = 5000;
-    const qint64 METADATA_TIMEOUT_MS = 30 * 1000;
+    const qint64 METADATA_TIMEOUT_MS = 20 * 1000;
 
     // Metadata scheduler: periodically top up the fetch queue from the PERSISTENT
     // store (infohashes still lacking metadata, most promising first by
