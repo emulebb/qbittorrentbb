@@ -56,8 +56,12 @@ using namespace Qt::Literals::StringLiterals;
 namespace
 {
     // BEP-51 active-crawl cadence and per-tick fan-out.
-    const int SAMPLE_INTERVAL_MS = 8000;
-    const int MAX_SAMPLE_NODES_PER_TICK = 8;
+    const int SAMPLE_INTERVAL_MS = 4000;
+    const int MAX_SAMPLE_NODES_PER_TICK = 12;
+    // Bounded keyspace traversal: how many sample requests may be outstanding per
+    // tick (caps recursion) and how many returned nodes to recurse into per reply.
+    const int SAMPLE_BUDGET_PER_TICK = 48;
+    const int RECURSE_NODES_PER_SAMPLE = 3;
 
     // Metadata-fetch timeout housekeeping.
     const int TIMEOUT_SWEEP_MS = 5000;
@@ -256,9 +260,14 @@ void DHTHarvester::handleAlert(const lt::alert *alert)
         {
             const auto *a = static_cast<const lt::dht_announce_alert *>(alert);
             const QString ih = hexOf(a->info_hash);
-            postSighting(ih, u"announce"_s, QString::fromStdString(a->ip.to_string()), a->port);
+            const QString peerIP = QString::fromStdString(a->ip.to_string());
+            postSighting(ih, u"announce"_s, peerIP, a->port);
             ++m_sightCount[ih];
             enqueue(ih);  // a peer HAS it -> fetch immediately
+            // The announcing peer holds the torrent: feed it straight to the
+            // in-flight metadata download instead of re-finding peers via DHT.
+            if (m_inFlight.contains(ih))
+                m_session->connectDHTMetadataPeer(ih, peerIP, a->port);
         }
         break;
     case lt::dht_sample_infohashes_alert::alert_type:
@@ -269,6 +278,19 @@ void DHTHarvester::handleAlert(const lt::alert *alert)
                 const QString ih = hexOf(sample);
                 postSighting(ih, u"sample"_s, {}, 0);
                 considerForMetadata(ih);
+            }
+            // Recurse into the returned (closer) nodes to traverse this region of
+            // the keyspace more deeply, bounded by the per-tick sample budget.
+            if (m_activeCrawl)
+            {
+                int recursed = 0;
+                for (const auto &node : a->nodes())
+                {
+                    if ((recursed++ >= RECURSE_NODES_PER_SAMPLE) || (m_sampleBudget <= 0))
+                        break;
+                    m_nativeSession->dht_sample_infohashes(node.second, randomTarget());
+                    --m_sampleBudget;
+                }
             }
         }
         break;
@@ -281,9 +303,24 @@ void DHTHarvester::handleAlert(const lt::alert *alert)
             int sampled = 0;
             for (const auto &node : nodes)
             {
-                if (sampled++ >= MAX_SAMPLE_NODES_PER_TICK)
+                if ((sampled++ >= MAX_SAMPLE_NODES_PER_TICK) || (m_sampleBudget <= 0))
                     break;
                 m_nativeSession->dht_sample_infohashes(node.second, randomTarget());
+                --m_sampleBudget;
+            }
+        }
+        break;
+    case lt::dht_get_peers_reply_alert::alert_type:
+        {
+            // Real swarm size for a known infohash (BEP-33-ish): store the peer
+            // count so the index/Torznab can report seeders/peers instead of a
+            // sighting proxy.
+            const auto *a = static_cast<const lt::dht_get_peers_reply_alert *>(alert);
+            const QString ih = hexOf(a->info_hash);
+            const int peers = a->num_peers();
+            if (m_store && (peers > 0))
+            {
+                QMetaObject::invokeMethod(m_store, [store = m_store, ih, peers] { store->updateSwarm(ih, peers); }, Qt::QueuedConnection);
             }
         }
         break;
@@ -314,7 +351,10 @@ void DHTHarvester::onSampleTimer()
     }
 
     if (m_activeCrawl)
+    {
+        m_sampleBudget = SAMPLE_BUDGET_PER_TICK;
         m_nativeSession->dht_live_nodes(randomTarget());
+    }
 
     pump();
 }
@@ -438,6 +478,10 @@ void DHTHarvester::onMetadataDownloaded(const TorrentInfo &info)
     {
         QMetaObject::invokeMethod(m_store, [store = m_store, torrent] { store->recordMetadata(torrent); }, Qt::QueuedConnection);
     }
+
+    // Ask the DHT how many peers have this (real swarm size) -> dht_get_peers_reply_alert.
+    const lt::sha1_hash ihHash = infoHash.v1();
+    m_nativeSession->dht_get_peers(ihHash);
 
     emit torrentIndexed(v1, torrent.name);
 

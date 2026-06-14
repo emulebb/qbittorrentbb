@@ -119,5 +119,6 @@ namespace BitTorrent
 
         QTimer *m_sampleTimer = nullptr;
         QTimer *m_timeoutTimer = nullptr;
+        int m_sampleBudget = 0;  // per-tick cap on outstanding BEP-51 sample requests
     };
 }
