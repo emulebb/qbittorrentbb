@@ -548,7 +548,7 @@ SessionImpl::SessionImpl(QObject *parent)
     , m_networkInterfaceName(BITTORRENT_SESSION_KEY(u"InterfaceName"_s))
     , m_networkInterfaceAddress(BITTORRENT_SESSION_KEY(u"InterfaceAddress"_s))
     , m_vpnGuardStunServer(BITTORRENT_SESSION_KEY(u"VPNGuardStunServer"_s))
-    , m_vpnGuardForbiddenAddress(BITTORRENT_SESSION_KEY(u"VPNGuardForbiddenAddress"_s))
+    , m_vpnGuardAllowedCidrs(BITTORRENT_SESSION_KEY(u"VPNGuardAllowedCidrs"_s))
     , m_vpnGuardHttpEcho(BITTORRENT_SESSION_KEY(u"VPNGuardHttpEcho"_s))
     , m_encryption(BITTORRENT_SESSION_KEY(u"Encryption"_s), 0)
     , m_maxActiveCheckingTorrents(BITTORRENT_SESSION_KEY(u"MaxActiveCheckingTorrents"_s), 1)
@@ -2040,7 +2040,7 @@ lt::settings_pack SessionImpl::loadLTSettings() const
     // and fail closed (pause all P2P) if it falls in the forbidden set. Driven
     // by INI keys BitTorrent\Session\VPNGuard* (empty = disabled).
     settingsPack.set_str(lt::settings_pack::vpn_guard_stun_server, m_vpnGuardStunServer.get().toStdString());
-    settingsPack.set_str(lt::settings_pack::vpn_guard_forbidden_address, m_vpnGuardForbiddenAddress.get().toStdString());
+    settingsPack.set_str(lt::settings_pack::vpn_guard_allowed_cidrs, m_vpnGuardAllowedCidrs.get().join(u',').toStdString());
     settingsPack.set_str(lt::settings_pack::vpn_guard_http_echo, m_vpnGuardHttpEcho.get().toStdString());
 
     settingsPack.set_int(lt::settings_pack::connection_speed, connectionSpeed());
@@ -6098,7 +6098,7 @@ void SessionImpl::handleAlert(lt::alert *alert)
         case lt::vpn_leak_alert::alert_type:
             {
                 const auto *a = static_cast<const lt::vpn_leak_alert *>(alert);
-                LogMsg(tr("VPN egress leak detected: observed public address %1 is in the forbidden set."
+                LogMsg(tr("VPN egress leak detected: observed public address %1 is outside the allowed VPN range(s)."
                           " All BitTorrent activity has been paused (fail-closed).")
                         .arg(QString::fromStdString(a->observed_address.to_string())), Log::CRITICAL);
             }

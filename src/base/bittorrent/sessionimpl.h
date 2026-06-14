@@ -764,7 +764,9 @@ namespace BitTorrent
         CachedSettingValue<QString> m_networkInterfaceAddress;
         // VPN egress guard (libtorrent settings_pack::vpn_guard_*): empty = off.
         CachedSettingValue<QString> m_vpnGuardStunServer;
-        CachedSettingValue<QString> m_vpnGuardForbiddenAddress;
+        // QStringList because QSettings parses the comma-separated INI value as a
+        // list (reading it as QString would mangle it); re-joined for libtorrent.
+        CachedSettingValue<QStringList> m_vpnGuardAllowedCidrs;
         CachedSettingValue<QString> m_vpnGuardHttpEcho;
         CachedSettingValue<int> m_encryption;
         CachedSettingValue<int> m_maxActiveCheckingTorrents;
