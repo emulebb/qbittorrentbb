@@ -43,6 +43,7 @@ reused. Scan `docs/active/items` before allocating the next number.
 | [QBBB-FEAT-001](items/QBBB-FEAT-001.md) | Major | OPEN | Branded idempotent export of the live torrent library to the eD2K share |
 | [QBBB-FEAT-002](items/QBBB-FEAT-002.md) | Major | OPEN | Persist harvested torrents to a sharded local on-disk store |
 | [QBBB-FEAT-003](items/QBBB-FEAT-003.md) | Minor | OPEN | Indexer schema + Torznab contract parity with emulebb-rust |
+| [QBBB-FEAT-004](items/QBBB-FEAT-004.md) | Critical | OPEN | Make vpnReady() truly fail-closed (verify bound IP equals the tunnel) — release-blocking |
 
 ## Bugs (`BUG`)
 
