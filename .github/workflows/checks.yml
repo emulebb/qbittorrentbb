@@ -1,0 +1,82 @@
+# Lightweight fork-delta + hygiene checks. These never compile the tree (the full
+# C++/Qt build is multi-hour and lives elsewhere); they enforce that the fork
+# delta described in fork-delta.json stays intact and clean on every push/PR.
+
+name: Fork checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fork-delta:
+    name: Validate fork-delta.json
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check delta manifest, paths and presence guards
+        run: |
+          python3 - <<'PY'
+          import json, sys, pathlib
+          d = json.load(open("fork-delta.json"))
+          errors = []
+          for k in ("schemaVersion", "upstream", "fork", "forkOwned", "sharedSeams"):
+              if k not in d: errors.append(f"missing top-level key: {k}")
+          for k in ("remote", "branch", "url", "baseCommit", "baseVersion"):
+              if k not in d.get("upstream", {}): errors.append(f"upstream.{k} missing")
+          for section in ("forkOwned", "sharedSeams"):
+              for e in d.get(section, []):
+                  if not pathlib.Path(e["path"]).exists():
+                      errors.append(f"{section} path missing: {e['path']}")
+          for g in d.get("presenceGuards", []):
+              p = pathlib.Path(g["path"])
+              if not p.exists():
+                  errors.append(f"presenceGuard path missing: {g['path']}"); continue
+              txt = p.read_text(encoding="utf-8", errors="replace")
+              for s in g["contains"]:
+                  if s not in txt:
+                      errors.append(f"{g['path']} no longer contains: {s!r}")
+          if errors:
+              print("FORK-DELTA CHECK FAILED:")
+              for e in errors: print("  -", e)
+              sys.exit(1)
+          print("fork-delta.json OK: manifest valid, paths present, presence guards satisfied")
+          PY
+
+  hygiene:
+    name: Source hygiene (fork-owned files)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: LF endings + no AI attribution
+        run: |
+          python3 - <<'PY'
+          import json, sys, pathlib, re
+          d = json.load(open("fork-delta.json"))
+          owned = [e["path"] for e in d.get("forkOwned", [])]
+          attribution = re.compile(r"(?i)\b(claude|anthropic)\b|Co-Authored-By:\s*Claude")
+          errors = []
+          for p in owned:
+              path = pathlib.Path(p)
+              if not path.exists(): continue
+              raw = path.read_bytes()
+              if b"\r\n" in raw: errors.append(f"CRLF line endings: {p}")
+              if attribution.search(raw.decode("utf-8", errors="replace")):
+                  errors.append(f"AI attribution found in: {p}")
+          if errors:
+              print("HYGIENE CHECK FAILED:")
+              for e in errors: print("  -", e)
+              sys.exit(1)
+          print("hygiene OK: LF endings, no AI attribution in fork-owned files")
+          PY
+      - name: clang-format (informational)
+        continue-on-error: true
+        run: |
+          if [ ! -f .clang-format ]; then echo "no .clang-format; skipping"; exit 0; fi
+          files=$(python3 -c "import json;print(' '.join(e['path'] for e in json.load(open('fork-delta.json'))['forkOwned'] if e['path'].endswith(('.cpp','.h','.hpp'))))")
+          [ -z "$files" ] && { echo "no C++ fork-owned files"; exit 0; }
+          clang-format --dry-run --Werror $files || echo "clang-format reported differences (informational, non-blocking)"

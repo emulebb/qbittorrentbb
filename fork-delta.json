@@ -57,6 +57,10 @@
     "Torznab/Prowlarr indexer at /api/v2/torznab/index with ?apikey= query auth.",
     "VPN-safe egress: drives the emulebb-libtorrent egress hardening + DNS resolver + VPN guard via INI keys (Session\\VPNGuard*); fail-closed on a leak."
   ],
+  "presenceGuards": [
+    { "path": "src/base/bittorrent/sessionimpl.cpp", "contains": ["vpn_guard_allowed_cidrs", "m_vpnGuardAllowedCidrs", "DHTHarvester", "vpn_leak_alert"] },
+    { "path": "src/webui/webapplication.cpp", "contains": ["torznab"] }
+  ],
   "rebaseWorkflow": [
     ".github/workflows/nightly-upstream.yml checks upstream release-5.x daily and rebases automation/upstream-nightly when upstream moved; it stops on conflict and does NOT run the multi-hour C++/Qt build or touch master.",
     "git fetch upstream",
