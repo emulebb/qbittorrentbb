@@ -905,6 +905,35 @@ QByteArray SessionImpl::dhtTorrentMetadata(const QString &infoHashV1) const
     return result;
 }
 
+void SessionImpl::connectDHTMetadataPeer(const QString &infoHashV1, const QString &ip, int port)
+{
+    // A peer found via the DHT announced that it holds this infohash. If we have
+    // an in-flight ephemeral metadata download for it, hand the peer straight to
+    // that torrent_handle so BEP-9 can proceed without re-discovering peers.
+    if (ip.isEmpty() || (port <= 0))
+        return;
+
+    const auto id = TorrentID::fromString(infoHashV1);
+    const auto iter = m_downloadedMetadata.constFind(id);
+    if ((iter == m_downloadedMetadata.constEnd()) || !iter.value().is_valid())
+        return;
+
+    lt::error_code ec;
+    const lt::address addr = lt::make_address(ip.toLatin1().constData(), ec);
+    if (ec)
+        return;
+
+    const lt::tcp::endpoint endpoint(addr, static_cast<unsigned short>(port));
+    try
+    {
+        iter.value().connect_peer(endpoint);
+    }
+    catch (const std::exception &)
+    {
+        // handle may have been removed concurrently; ignore.
+    }
+}
+
 HarvestStats SessionImpl::dhtHarvestStats() const
 {
     if (!m_dhtHarvester)
@@ -2001,7 +2030,7 @@ lt::settings_pack SessionImpl::loadLTSettings() const
         | lt::alert::status_notification
         | lt::alert::storage_notification
         | lt::alert::tracker_notification
-        | (isDHTHarvesterEnabled() ? lt::alert::dht_notification : lt::alert_category_t());
+        | (isDHTHarvesterEnabled() ? (lt::alert::dht_notification | lt::alert::dht_operation_notification) : lt::alert_category_t());
     settingsPack.set_int(lt::settings_pack::alert_mask, alertMask);
 
     settingsPack.set_int(lt::settings_pack::connection_speed, connectionSpeed());
@@ -2196,6 +2225,30 @@ lt::settings_pack SessionImpl::loadLTSettings() const
     settingsPack.set_int(lt::settings_pack::active_dht_limit, -1);
     settingsPack.set_int(lt::settings_pack::active_lsd_limit, -1);
     settingsPack.set_int(lt::settings_pack::alert_queue_size, std::numeric_limits<int>::max() / 2);
+
+    // DHT harvester tuning: when crawling the mainline DHT we want to *receive*
+    // as much incoming get_peers/announce traffic as possible (passive discovery)
+    // and answer it, plus run a denser routing table for active BEP-51 sampling.
+    // Defaults throttle DHT hard (8 KiB/s up, 5 in-flight queries), which starves
+    // a crawler. These only take effect while the harvester is enabled.
+    if (isDHTHarvesterEnabled())
+    {
+        // Let the node serve far more DHT traffic than the default 8 KiB/s so it
+        // stays reachable to the swarm and our replies don't get dropped.
+        settingsPack.set_int(lt::settings_pack::dht_upload_rate_limit, 64 * 1024);
+        // Don't ban peers that flood us with queries — that's exactly the traffic
+        // a passive harvester wants to keep seeing.
+        settingsPack.set_int(lt::settings_pack::dht_block_ratelimit, 50);
+        // Keep a large peer/torrent store so we observe more of the keyspace.
+        settingsPack.set_int(lt::settings_pack::dht_max_peers, 1000);
+        settingsPack.set_int(lt::settings_pack::dht_max_torrents, 5000);
+        settingsPack.set_int(lt::settings_pack::dht_max_dht_items, 5000);
+        // More peers per get_peers reply -> better real swarm counts (B1).
+        settingsPack.set_int(lt::settings_pack::dht_max_peers_reply, 100);
+        // Allow many concurrent in-flight DHT requests for active sampling.
+        settingsPack.set_int(lt::settings_pack::dht_announce_interval, 60);
+        settingsPack.set_bool(lt::settings_pack::dht_aggressive_lookups, true);
+    }
 
     // Outgoing ports
     settingsPack.set_int(lt::settings_pack::outgoing_port, outgoingPortsMin());
@@ -6041,6 +6094,7 @@ void SessionImpl::handleAlert(lt::alert *alert)
         case lt::dht_announce_alert::alert_type:
         case lt::dht_sample_infohashes_alert::alert_type:
         case lt::dht_live_nodes_alert::alert_type:
+        case lt::dht_get_peers_reply_alert::alert_type:
             if (m_dhtHarvester)
                 m_dhtHarvester->handleAlert(alert);
             break;
