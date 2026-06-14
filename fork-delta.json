@@ -1,0 +1,75 @@
+{
+  "schemaVersion": "emulebb-fork-delta/v1",
+  "upstream": {
+    "remote": "upstream",
+    "branch": "release-5.2.1",
+    "url": "https://github.com/qbittorrent/qBittorrent.git",
+    "baseCommit": "7e8db603f",
+    "baseVersion": "5.2.1"
+  },
+  "fork": {
+    "remote": "origin",
+    "branch": "master",
+    "url": "https://github.com/emulebb/qbittorrentbb.git",
+    "engine": "https://github.com/emulebb/emulebb-libtorrent.git (RC_2_0)"
+  },
+  "goals": [
+    "Add a self-contained DHT harvester + local torrent index to qBittorrent, surfaced via GUI, an RSS source, and a Torznab/Prowlarr indexer.",
+    "Keep generic qBittorrent behaviour as close to upstream release-5.2.1 as possible (additive seams).",
+    "Make upstream rebases conflict-driven; master carries the fork delta and is rebased onto a newer release-5.x tag when bumping."
+  ],
+  "policy": {
+    "buildOutput": "Configure/build out-of-source under %EMULEBB_WORKSPACE_OUTPUT_ROOT% only; never this tree or c:\\prj. vcpkg + Qt6 (aqt) + the emulebb-libtorrent install at <out>\\deps\\libtorrent.",
+    "lineEndings": "LF",
+    "attribution": "No AI/Claude/Anthropic attribution anywhere.",
+    "egress": "Live swarm/DHT egress MUST bind the hide.me VPN tunnel (Interface empty + InterfaceAddress=<live tunnel IPv4>, exe in split-tunnel whitelist). WebUI/control/probe traffic binds X_LOCAL_IP, never loopback.",
+    "privacy": "No private data or real media titles in commits; live VPN ranges stay in the git-ignored test/livewire/*.json."
+  },
+  "forkOwned": [
+    { "path": "src/base/bittorrent/harveststore.h", "reason": "SQLite torrent index (FTS5)" },
+    { "path": "src/base/bittorrent/harveststore.cpp", "reason": "Index store: sightings, metadata, swarm counts" },
+    { "path": "src/base/bittorrent/dhtharvester.h", "reason": "magnetico/btdigg-style DHT harvester" },
+    { "path": "src/base/bittorrent/dhtharvester.cpp", "reason": "Passive + BEP-51 + swarm-peer discovery, BEP-9 metadata" },
+    { "path": "src/gui/dhtindex/dhtindexwidget.h", "reason": "DHT Index GUI tab" },
+    { "path": "src/gui/dhtindex/dhtindexwidget.cpp", "reason": "Sortable index table + content pane + download action" },
+    { "path": "src/gui/dhtindex/harvestcontenthandler.h", "reason": "Read-only content handler over harvested TorrentInfo" },
+    { "path": "src/gui/dhtindex/harvestcontenthandler.cpp", "reason": "Lower-pane content view for indexed torrents" },
+    { "path": "src/webui/api/torznabcontroller.h", "reason": "Torznab/Prowlarr indexer endpoint" },
+    { "path": "src/webui/api/torznabcontroller.cpp", "reason": "caps + search XML over the DHT index" },
+    { "path": "test/livewire/vpn_guard_test.py", "reason": "Repeatable live-wire VPN-guard harness (reads git-ignored JSON)" }
+  ],
+  "sharedSeams": [
+    { "path": "src/base/bittorrent/session.h", "reason": "DHT-index/harvester interface + connectDHTMetadataPeer" },
+    { "path": "src/base/bittorrent/sessionimpl.h", "reason": "Harvester members, vpn-guard settings, alert/decl wiring" },
+    { "path": "src/base/bittorrent/sessionimpl.cpp", "reason": "Harvester lifecycle, DHT tuning, alert routing, connectDHTMetadataPeer, vpn_guard settings injection + alert handling" },
+    { "path": "src/base/rss/rss_session.h", "reason": "DHT-index RSS feed surface (addDHTFinding)" },
+    { "path": "src/base/rss/rss_session.cpp", "reason": "Buffered/debounced DHT findings -> RSS articles" },
+    { "path": "src/base/rss/rss_feed.cpp", "reason": "qbt:// local feed guard in refresh()" },
+    { "path": "src/app/application.cpp", "reason": "Connect dhtTorrentIndexed -> RSS::Session::addDHTFinding" },
+    { "path": "src/webui/webapplication.cpp", "reason": "?apikey= query auth for the torznab scope + controller registration" },
+    { "path": "src/base/CMakeLists.txt", "reason": "Register harveststore/dhtharvester" },
+    { "path": "src/gui/CMakeLists.txt", "reason": "Register dhtindex sources" },
+    { "path": "src/webui/CMakeLists.txt", "reason": "Register torznabcontroller" }
+  ],
+  "features": [
+    "DHT harvester -> local SQLite index (FTS5): passive get_peers/announce + BEP-51 sampling + connected swarm-peer BEP-51 seeding; popularity-gated BEP-9 metadata; real swarm counts via dht_get_peers.",
+    "DHT Index GUI tab (sortable/resizable, content pane, download) and an internal RSS source exposing new findings (auto-download via RSS rules).",
+    "Torznab/Prowlarr indexer at /api/v2/torznab/index with ?apikey= query auth.",
+    "VPN-safe egress: drives the emulebb-libtorrent egress hardening + DNS resolver + VPN guard via INI keys (Session\\VPNGuard*); fail-closed on a leak."
+  ],
+  "rebaseWorkflow": [
+    ".github/workflows/nightly-upstream.yml checks upstream release-5.x daily and rebases automation/upstream-nightly when upstream moved; it stops on conflict and does NOT run the multi-hour C++/Qt build or touch master.",
+    "git fetch upstream",
+    "git checkout -b upstream-sync/YYYYMMDD master",
+    "git rebase <upstream/release-5.x>",
+    "Resolve forkOwned paths by preserving the fork files (new files; low conflict risk).",
+    "Resolve sharedSeams by re-applying the additive registrations/wiring.",
+    "Rebuild against emulebb-libtorrent, run test/livewire/vpn_guard_test.py and a harvester smoke."
+  ],
+  "acceptance": [
+    "All forkOwned files exist and the CMakeLists register them.",
+    "qbittorrent.exe builds Release x64 against emulebb-libtorrent.",
+    "Torznab caps/search respond; harvester indexes from the DHT bound to the tunnel.",
+    "VPN guard live-wire harness passes (ALLOW clean + LEAK fail-closed)."
+  ]
+}
