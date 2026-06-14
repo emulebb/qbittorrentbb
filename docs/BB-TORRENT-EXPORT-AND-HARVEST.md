@@ -7,6 +7,13 @@ context: `emulebb-tooling/docs/active/SUITE-JOINT-ROADMAP.md` and
 harvester (`src/base/bittorrent/harveststore.*`, `dhtharvester.*`, Torznab
 endpoint).
 
+## Naming
+
+**eMuleBB** = the C++ MFC desktop app. **emulebb-rust** = the Rust eD2K/Kad core.
+The branded export feeds the active eD2K share — **primarily emulebb-rust**
+(`emulebb-metadata`, the strategic forward core); MFC `known.met` is a compat
+path. "eMuleBB stack" here means whichever eMule-family core is active.
+
 ## Two strictly separate libraries
 
 qBittorrentBB owns both, and they must never mix:
