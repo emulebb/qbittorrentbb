@@ -7,10 +7,12 @@ fork. It follows the eMuleBB backlog convention
 each item is `docs/active/items/<ID>.md` with the same front matter and section
 vocabulary.
 
-Items are **local-only for now** (`workflow: local`): there is no GitHub-primary
-mirror or Project board yet, so these Markdown files are the authoritative spec.
-If/when a qBittorrentBB Project is opened, migrate items to `workflow: github`
-per the shared process.
+Active items are **GitHub-tracked** (`workflow: github`): issues live in
+`emulebb/qbittorrentbb` and are aggregated on the org **eMuleBB Suite** board
+(`https://github.com/orgs/emulebb/projects/3`, `Product = qBittorrentBB`,
+`Phase` field). GitHub owns workflow state; these Markdown files own the durable
+engineering spec. Parked ideas stay out of the tracker (see the roadmap's Active
+vs Parked ledger).
 
 ## Current Snapshot
 
