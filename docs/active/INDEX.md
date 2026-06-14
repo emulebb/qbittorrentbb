@@ -30,16 +30,19 @@ ledger and `emulebb-tooling/docs/ideas/IDEA-COOPERATIVE-DHT-COOPERATION.md`.
 
 ## ID Taxonomy
 
-Same classes as eMuleBB: `BUG`, `FEAT`, `REF`, `CI`. IDs are allocated per class
-and never reused. Scan `docs/active/items` before allocating the next number.
+Item IDs carry a **product prefix** so they never collide across the suite repos:
+qBittorrentBB uses `QBBB-<CLASS>-<NNN>` with classes `BUG`, `FEAT`, `REF`, `CI`
+(e.g. `QBBB-FEAT-001`). Other products use `RUST-`, `GOED2K-`, `AMUT-`; the frozen
+MFC app keeps its legacy unprefixed IDs. IDs are allocated per class and never
+reused. Scan `docs/active/items` before allocating the next number.
 
 ## Features (`FEAT`)
 
 | ID | Priority | Status | Title |
 |----|----------|--------|-------|
-| [FEAT-001](items/FEAT-001.md) | Major | OPEN | Branded idempotent export of the live torrent library to the eD2K share |
-| [FEAT-002](items/FEAT-002.md) | Major | OPEN | Persist harvested torrents to a sharded local on-disk store |
-| [FEAT-003](items/FEAT-003.md) | Minor | OPEN | Indexer schema + Torznab contract parity with emulebb-rust |
+| [QBBB-FEAT-001](items/QBBB-FEAT-001.md) | Major | OPEN | Branded idempotent export of the live torrent library to the eD2K share |
+| [QBBB-FEAT-002](items/QBBB-FEAT-002.md) | Major | OPEN | Persist harvested torrents to a sharded local on-disk store |
+| [QBBB-FEAT-003](items/QBBB-FEAT-003.md) | Minor | OPEN | Indexer schema + Torznab contract parity with emulebb-rust |
 
 ## Bugs (`BUG`)
 
