@@ -532,3 +532,71 @@ HarvestStats HarvestStore::stats() const
 
     return result;
 }
+
+QList<QString> HarvestStore::candidatesForMetadata(int limit) const
+{
+    QList<QString> out;
+    if (limit <= 0)
+        return out;
+
+    auto db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery query {db};
+    query.prepare(u"SELECT infohash_v1 FROM torrents"
+                  u" WHERE metadata_fetched = 0 AND fetch_attempts < :maxAttempts"
+                  u"   AND (last_attempt_ms = 0 OR (:now - last_attempt_ms) > :backoff)"
+                  u" ORDER BY availability_score DESC, last_seen_ms DESC"
+                  u" LIMIT :limit;"_s);
+    query.bindValue(u":maxAttempts"_s, MAX_FETCH_ATTEMPTS);
+    query.bindValue(u":now"_s, nowMs());
+    query.bindValue(u":backoff"_s, FETCH_BACKOFF_MS);
+    query.bindValue(u":limit"_s, limit);
+    if (!query.exec())
+        return out;
+
+    while (query.next())
+        out.append(query.value(0).toString());
+    return out;
+}
+
+HarvestPruneStats HarvestStore::prune(const qint64 staleAgeMs, const qint64 sightingRetentionMs, const qint64 maxTorrents)
+{
+    HarvestPruneStats result;
+    const qint64 now = nowMs();
+    auto db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery query {db};
+
+    // 1. drop metadata-less torrents that exhausted their fetch attempts and have
+    // not been seen recently (FTS rows + file rows cascade via trigger/FK).
+    query.prepare(u"DELETE FROM torrents WHERE metadata_fetched = 0"
+                  u" AND fetch_attempts >= :maxAttempts AND last_seen_ms < :cutoff;"_s);
+    query.bindValue(u":maxAttempts"_s, MAX_FETCH_ATTEMPTS);
+    query.bindValue(u":cutoff"_s, now - staleAgeMs);
+    if (query.exec())
+        result.torrentsPruned += query.numRowsAffected();
+
+    // 2. prune old sightings (the fastest-growing table).
+    query.prepare(u"DELETE FROM infohash_sightings WHERE observed_at_ms < :cutoff;"_s);
+    query.bindValue(u":cutoff"_s, now - sightingRetentionMs);
+    if (query.exec())
+        result.sightingsPruned += query.numRowsAffected();
+
+    // 3. hard cap: if still over the row budget, drop the oldest metadata-less
+    // torrents (never the ones we actually have metadata for).
+    if (maxTorrents > 0)
+    {
+        qint64 total = 0;
+        if (query.exec(u"SELECT count(*) FROM torrents;"_s) && query.next())
+            total = query.value(0).toLongLong();
+        if (total > maxTorrents)
+        {
+            query.prepare(u"DELETE FROM torrents WHERE id IN ("
+                          u"SELECT id FROM torrents WHERE metadata_fetched = 0"
+                          u" ORDER BY last_seen_ms ASC LIMIT :excess);"_s);
+            query.bindValue(u":excess"_s, (total - maxTorrents));
+            if (query.exec())
+                result.torrentsPruned += query.numRowsAffected();
+        }
+    }
+
+    return result;
+}
