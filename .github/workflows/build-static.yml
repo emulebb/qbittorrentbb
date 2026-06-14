@@ -1,0 +1,133 @@
+name: Build - Static (single exe)
+
+# Produces a single, statically-linked qbittorrent.exe (vcpkg x64-windows-static
+# including Qt6), driven by emule_workspace -- the same build logic used locally.
+# The first cold run builds static Qt6 from source and takes 1-2h; the vcpkg GHA
+# binary cache makes subsequent runs much faster.
+#
+# Requires an org-scoped token (secrets.EMULEBB_CI_PAT) to check out the sibling
+# private forks emulebb-libtorrent and emulebb-build.
+
+# Manual-only for now: the cold static-Qt build is long and needs the
+# EMULEBB_CI_PAT secret for the sibling private-fork checkouts. Once the first
+# dispatch is green and the secret is configured, enable a push(master) trigger.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: ${{ github.head_ref != '' }}
+
+jobs:
+  build:
+    name: Static build (x64)
+    runs-on: windows-2022
+    timeout-minutes: 360
+    permissions:
+      actions: write  # vcpkg GHA binary cache (x-gha)
+
+    env:
+      triplet: x64-windows-static
+      output_root: ${{ runner.temp }}\emulebb_out
+
+    steps:
+      - name: Checkout qbittorrentbb
+        uses: actions/checkout@v4
+        with:
+          path: qbittorrentbb
+          persist-credentials: false
+
+      - name: Checkout emulebb-libtorrent
+        uses: actions/checkout@v4
+        with:
+          repository: emulebb/emulebb-libtorrent
+          ref: RC_2_0
+          submodules: recursive
+          token: ${{ secrets.EMULEBB_CI_PAT }}
+          path: emulebb-libtorrent
+          persist-credentials: false
+
+      - name: Checkout emulebb-build
+        uses: actions/checkout@v4
+        with:
+          repository: emulebb/emulebb-build
+          token: ${{ secrets.EMULEBB_CI_PAT }}
+          path: emulebb-build
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install emule_workspace
+        run: pip install .\emulebb-build
+
+      # https://learn.microsoft.com/en-us/vcpkg/users/binarycaching#gha
+      - name: Set up vcpkg GHA binary cache
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', (process.env.ACTIONS_CACHE_URL || ''));
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', (process.env.ACTIONS_RUNTIME_TOKEN || ''));
+
+      - name: Install static dependencies with vcpkg
+        run: |
+          $env:VCPKG_BINARY_SOURCES = "clear;x-gha,readwrite"
+          # Static (CRT + libs) Qt6 + engine deps. The feature/boost set may need
+          # tuning across libtorrent/qBittorrent versions; iterate here on failure.
+          $packages = @(
+            "qtbase[widgets,network,sql-sqlite]",
+            "qttools",
+            "qtsvg",
+            "openssl",
+            "zlib",
+            "boost-asio",
+            "boost-system",
+            "boost-date-time",
+            "boost-chrono",
+            "boost-random",
+            "boost-pool",
+            "boost-multiprecision",
+            "boost-crc",
+            "boost-scope-exit",
+            "boost-logic",
+            "boost-variant",
+            "boost-circular-buffer"
+          )
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+            --triplet $env:triplet `
+            --clean-after-build `
+            $packages
+
+      - name: Build static qbittorrent.exe
+        env:
+          EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
+          EMULEBB_LIBTORRENT_REPO: ${{ github.workspace }}\emulebb-libtorrent
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ env.output_root }}
+        run: |
+          # VCPKG_INSTALLATION_ROOT is a runner OS env var (not the workflow env
+          # context), so wire VCPKG_ROOT here for emule_workspace's toolchain lookup.
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          python -m emule_workspace build qbittorrentbb-ci --static
+
+      - name: Verify single self-contained exe
+        run: |
+          $exe = "$env:output_root\builds\qbittorrentbb\Release\qbittorrent.exe"
+          if (-not (Test-Path $exe)) { throw "qbittorrent.exe not found at $exe" }
+          $deps = & dumpbin /dependents $exe
+          Write-Host $deps
+          $forbidden = $deps | Select-String -Pattern "Qt6.*\.dll|torrent-rasterbar.*\.dll|libssl.*\.dll|libcrypto.*\.dll|zlib1\.dll" -AllMatches
+          if ($forbidden) {
+            throw "Dynamic dependency on a bundled library detected -- not a self-contained static build."
+          }
+          Write-Host "OK: statically linked single exe."
+
+      - name: Upload qbittorrent.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: qbittorrent-static-x64
+          path: ${{ env.output_root }}\builds\qbittorrentbb\Release\qbittorrent.exe
+          if-no-files-found: error
