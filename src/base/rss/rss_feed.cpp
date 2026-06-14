@@ -143,6 +143,11 @@ void Feed::markAsRead()
 
 void Feed::refresh()
 {
+    // Built-in local feeds (e.g. the DHT index) are fed programmatically and are
+    // never fetched from the network.
+    if (m_url.startsWith(u"qbt://"))
+        return;
+
     if (!m_isInitialized)
     {
         m_pendingRefresh = true;
