@@ -23,6 +23,25 @@ Everything below is this repo's local deltas only:
   Never use `127.0.0.1` or `localhost` for harness control on the operator
   split-tunnel machine.
 
+## Scope: core vs external (REST API boundary)
+
+- HARD RULE: if a capability can be implemented through the WebUI / REST API, it
+  does NOT belong in the core app — delegate it to an external controller or
+  script that drives the API. The core fork only carries changes that *must* live
+  in the core because they cannot be expressed over REST.
+- "Must live in core" means it hooks libtorrent internals or the session at a
+  level the API cannot reach: peer-connection filtering / auto-ban plugins, egress
+  socket binding (VPN guard / `IP_UNICAST_IF`), the DHT harvesting / indexing
+  engine, custom session extensions, alert-pipeline logging. These stay here.
+- Orchestration and automation are out of scope for the core: tracker-list
+  auto-update, download/upload scheduling, RSS smart-filter orchestration,
+  ban-by-IP management / expiry, dashboards and reporting — these are external
+  controllers/scripts on top of the REST API, not core edits.
+- When a feature is partly core and partly orchestration, build only the
+  irreducible core seam here (expose it via an API endpoint if needed) and push
+  everything else to the external controller. Prefer extending an API endpoint
+  over adding UI / business logic to the core.
+
 ## Fork delta
 
 - The exact delta over upstream qBittorrent `release-5.2.1` (fork-owned files,
