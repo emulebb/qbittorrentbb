@@ -409,9 +409,15 @@ void AdvancedSettings::saveAdvancedSettings() const
     session->setAutoBanUnknownPeerEnabled(m_checkBoxAutoBanUnknownPeer.isChecked());
     session->setAutoBanBTPlayerPeerEnabled(m_checkBoxAutoBanBTPlayerPeer.isChecked());
     session->setAutoBanUnknownEverywhereEnabled(m_checkBoxAutoBanUnknownEverywhere.isChecked());
-    session->setAutoBanUnknownCountries(parseCountryCodes(m_lineEditAutoBanUnknownCountries.text()));
-    session->setAutoBanBlockedCountries(parseCountryCodes(m_lineEditAutoBanBlockedCountries.text()));
+    const QStringList autoBanUnknownCountries = parseCountryCodes(m_lineEditAutoBanUnknownCountries.text());
+    const QStringList autoBanBlockedCountries = parseCountryCodes(m_lineEditAutoBanBlockedCountries.text());
+    session->setAutoBanUnknownCountries(autoBanUnknownCountries);
+    session->setAutoBanBlockedCountries(autoBanBlockedCountries);
     session->setShadowBanEnabled(m_checkBoxShadowBan.isChecked());
+    // Country-based bans need peer-country resolution (GeoIP). Entering any
+    // country auto-enables it, which triggers the GeoIP database download.
+    if (!autoBanUnknownCountries.isEmpty() || !autoBanBlockedCountries.isEmpty())
+        pref->resolvePeerCountries(true);
 }
 
 #ifndef QBT_USES_LIBTORRENT2
