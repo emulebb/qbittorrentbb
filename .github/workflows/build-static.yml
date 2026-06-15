@@ -88,15 +88,12 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', (process.env.ACTIONS_CACHE_URL || ''));
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', (process.env.ACTIONS_RUNTIME_TOKEN || ''));
 
-      - name: Install static dependencies with vcpkg
+      # Engine (libtorrent) deps only -- boost/openssl/zlib, NOT Qt. These are
+      # small and build/cache fast, so the engine stage below can fail fast.
+      - name: Install engine deps with vcpkg (boost/openssl/zlib)
         run: |
           $env:VCPKG_BINARY_SOURCES = "clear;x-gha,readwrite"
-          # Static (CRT + libs) Qt6 + engine deps. The feature/boost set may need
-          # tuning across libtorrent/qBittorrent versions; iterate here on failure.
           $packages = @(
-            "qtbase[widgets,network,sql-sqlite]",
-            "qttools",
-            "qtsvg",
             "openssl",
             "zlib",
             "boost-asio",
@@ -117,7 +114,32 @@ jobs:
             --clean-after-build `
             $packages
 
-      - name: Build static qbittorrent.exe
+      # Build the engine first: surfaces libtorrent compile errors in minutes,
+      # before paying the slow static-Qt build.
+      - name: Build static libtorrent (engine)
+        env:
+          EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
+          EMULEBB_LIBTORRENT_REPO: ${{ github.workspace }}\emulebb-libtorrent
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ env.OUTPUT_ROOT }}
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          python -m emule_workspace build qbittorrentbb-ci --static --stage libtorrent
+
+      # Qt6 static (the slow part) -- only reached once the engine compiles.
+      - name: Install Qt with vcpkg (static)
+        run: |
+          $env:VCPKG_BINARY_SOURCES = "clear;x-gha,readwrite"
+          $packages = @(
+            "qtbase[widgets,network,sql-sqlite]",
+            "qttools",
+            "qtsvg"
+          )
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+            --triplet $env:triplet `
+            --clean-after-build `
+            $packages
+
+      - name: Build static qbittorrent.exe (app)
         env:
           EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
           EMULEBB_LIBTORRENT_REPO: ${{ github.workspace }}\emulebb-libtorrent
@@ -126,7 +148,7 @@ jobs:
           # VCPKG_INSTALLATION_ROOT is a runner OS env var (not the workflow env
           # context), so wire VCPKG_ROOT here for emule_workspace's toolchain lookup.
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
-          python -m emule_workspace build qbittorrentbb-ci --static
+          python -m emule_workspace build qbittorrentbb-ci --static --stage qbittorrent
 
       - name: Dump build logs on failure
         if: failure()
