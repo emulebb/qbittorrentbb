@@ -61,6 +61,34 @@ namespace
         xml.writeAttribute(u"value"_s, value);
         xml.writeEndElement();
     }
+
+    // Resolves the categories to echo back to the *Arr caller. The DHT index has
+    // no per-item category metadata, so we honor the caller's intent: echo the
+    // requested `cat` list, else derive a top-level category from the search type
+    // (tvsearch -> TV, movie -> Movies, ...). This passes *Arr's category gate;
+    // relevance is still decided by *Arr's own release-name parser.
+    QList<QString> resolveResponseCategories(const QString &type, const QString &cat)
+    {
+        QList<QString> cats;
+        for (const QString &part : cat.split(u',', Qt::SkipEmptyParts))
+        {
+            const QString trimmed = part.trimmed();
+            if (!trimmed.isEmpty() && !cats.contains(trimmed))
+                cats.append(trimmed);
+        }
+        if (!cats.isEmpty())
+            return cats;
+
+        if ((type == u"tvsearch"_s) || (type == u"tv-search"_s))
+            return {u"5000"_s};
+        if ((type == u"movie"_s) || (type == u"movie-search"_s))
+            return {u"2000"_s};
+        if ((type == u"music"_s) || (type == u"music-search"_s))
+            return {u"3000"_s};
+        if ((type == u"book"_s) || (type == u"book-search"_s))
+            return {u"7000"_s};
+        return {OTHER_CATEGORY};
+    }
 }
 
 void TorznabController::indexAction()
@@ -132,6 +160,10 @@ QByteArray TorznabController::buildResults() const
     if ((limit <= 0) || (limit > MAX_LIMIT))
         limit = DEFAULT_LIMIT;
 
+    // Categories to echo to the caller (same for every item; see helper).
+    const QList<QString> categories = resolveResponseCategories(
+            params().value(u"t"_s), params().value(u"cat"_s));
+
     auto *session = BitTorrent::Session::instance();
     const QList<BitTorrent::HarvestSearchResult> results = query.isEmpty()
             ? session->recentDHTIndex(limit)
@@ -172,6 +204,7 @@ QByteArray TorznabController::buildResults() const
                 , QDateTime::fromMSecsSinceEpoch(result.firstSeenMs).toString(Qt::RFC2822Date));
         xml.writeTextElement(u"size"_s, QString::number(result.size));
         xml.writeTextElement(u"link"_s, magnet);
+        xml.writeTextElement(u"category"_s, categories.first());
 
         xml.writeStartElement(u"enclosure"_s);
         xml.writeAttribute(u"url"_s, magnet);
@@ -179,7 +212,8 @@ QByteArray TorznabController::buildResults() const
         xml.writeAttribute(u"type"_s, u"application/x-bittorrent"_s);
         xml.writeEndElement();
 
-        writeTorznabAttr(xml, u"category"_s, OTHER_CATEGORY);
+        for (const QString &category : categories)
+            writeTorznabAttr(xml, u"category"_s, category);
         writeTorznabAttr(xml, u"size"_s, QString::number(result.size));
         writeTorznabAttr(xml, u"infohash"_s, result.infoHashV1);
         writeTorznabAttr(xml, u"magneturl"_s, magnet);
