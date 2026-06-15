@@ -164,10 +164,15 @@ QByteArray TorznabController::buildResults() const
     const QList<QString> categories = resolveResponseCategories(
             params().value(u"t"_s), params().value(u"cat"_s));
 
+    int offset = params().value(u"offset"_s).toInt();
+    if (offset < 0)
+        offset = 0;
+
     auto *session = BitTorrent::Session::instance();
-    const QList<BitTorrent::HarvestSearchResult> results = query.isEmpty()
-            ? session->recentDHTIndex(limit)
-            : session->searchDHTIndex(query, limit);
+    const BitTorrent::HarvestSearchPage page = query.isEmpty()
+            ? session->recentDHTIndex(limit, offset)
+            : session->searchDHTIndex(query, limit, offset);
+    const QList<BitTorrent::HarvestSearchResult> &results = page.items;
 
     QByteArray out;
     QXmlStreamWriter xml {&out};
@@ -181,6 +186,12 @@ QByteArray TorznabController::buildResults() const
     xml.writeStartElement(u"channel"_s);
     xml.writeTextElement(u"title"_s, u"qBittorrentBB DHT Index"_s);
     xml.writeTextElement(u"description"_s, u"Torrents discovered from the BitTorrent DHT"_s);
+
+    // Paging info so *Arr can page through large result sets.
+    xml.writeStartElement(TORZNAB_NS, u"response"_s);
+    xml.writeAttribute(u"offset"_s, QString::number(offset));
+    xml.writeAttribute(u"total"_s, QString::number(page.total));
+    xml.writeEndElement();
 
     for (const BitTorrent::HarvestSearchResult &result : results)
     {
