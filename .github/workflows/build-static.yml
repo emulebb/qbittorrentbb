@@ -115,7 +115,8 @@ jobs:
             "boost-intrusive",
             "boost-functional",
             "boost-date-time",
-            "boost-circular-buffer"
+            "boost-circular-buffer",
+            "boost-stacktrace"
           )
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
             --triplet $env:triplet `
