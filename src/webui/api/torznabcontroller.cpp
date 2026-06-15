@@ -30,6 +30,7 @@
 
 #include <QDateTime>
 #include <QList>
+#include <QSet>
 #include <QString>
 #include <QUrl>
 #include <QXmlStreamWriter>
@@ -60,6 +61,21 @@ namespace
         xml.writeAttribute(u"name"_s, name);
         xml.writeAttribute(u"value"_s, value);
         xml.writeEndElement();
+    }
+
+    // Standard Torznab/Newznab error document (e.g. code 202 = no such function).
+    QByteArray buildErrorXml(const int code, const QString &description)
+    {
+        QByteArray out;
+        QXmlStreamWriter xml {&out};
+        xml.setAutoFormatting(true);
+        xml.writeStartDocument();
+        xml.writeStartElement(u"error"_s);
+        xml.writeAttribute(u"code"_s, QString::number(code));
+        xml.writeAttribute(u"description"_s, description);
+        xml.writeEndElement();
+        xml.writeEndDocument();
+        return out;
     }
 
     // Resolves the categories to echo back to the *Arr caller. The DHT index has
@@ -95,9 +111,23 @@ void TorznabController::indexAction()
 {
     const QString type = params().value(u"t"_s);
     if (type == u"caps"_s)
+    {
         setResult(buildCaps(), u"application/xml; charset=UTF-8"_s);
-    else  // search / tvsearch / movie / movie-search / (empty RSS test)
-        setResult(buildResults(), u"application/rss+xml; charset=UTF-8"_s);
+        return;
+    }
+
+    // Recognized search functions (empty = a bare feed/test request). Anything
+    // else is an unknown Torznab function -> standard error 202.
+    static const QSet<QString> searchFunctions {
+        u""_s, u"search"_s, u"tvsearch"_s, u"tv-search"_s, u"movie"_s,
+        u"movie-search"_s, u"music"_s, u"music-search"_s, u"book"_s, u"book-search"_s};
+    if (!searchFunctions.contains(type))
+    {
+        setResult(buildErrorXml(202, u"No such function"_s), u"application/xml; charset=UTF-8"_s);
+        return;
+    }
+
+    setResult(buildResults(), u"application/rss+xml; charset=UTF-8"_s);
 }
 
 QByteArray TorznabController::buildCaps() const
