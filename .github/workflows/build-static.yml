@@ -13,6 +13,11 @@ name: Build - Static (single exe)
 # dispatch is green and the secret is configured, enable a push(master) trigger.
 on:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Package version: MAJOR.MINOR.PATCH[-suffix]"
+        required: false
+        default: "0.0.0-dev"
 
 permissions: {}
 
@@ -125,9 +130,22 @@ jobs:
           }
           Write-Host "OK: statically linked single exe."
 
-      - name: Upload qbittorrent.exe
+      - name: Package (ZIP + manifest + SBOM, unsigned)
+        env:
+          EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
+          EMULEBB_LIBTORRENT_REPO: ${{ github.workspace }}\emulebb-libtorrent
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ env.output_root }}
+        run: >
+          python -m emule_workspace package-qbittorrentbb
+          --release-version "${{ github.event.inputs.release_version || '0.0.0-dev' }}"
+          --clean
+
+      - name: Upload release package
         uses: actions/upload-artifact@v4
         with:
-          name: qbittorrent-static-x64
-          path: ${{ env.output_root }}\builds\qbittorrentbb\Release\qbittorrent.exe
+          name: qbittorrentbb-static-x64
+          path: |
+            ${{ env.output_root }}\release\**\*.zip
+            ${{ env.output_root }}\release\**\*.manifest.json
+            ${{ env.output_root }}\release\**\*.sbom.spdx.json
           if-no-files-found: error
