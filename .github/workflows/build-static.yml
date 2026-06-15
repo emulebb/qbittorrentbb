@@ -1,16 +1,14 @@
-name: Build - Static (single exe)
+name: Build - Windows (folder)
 
-# Produces a single, statically-linked qbittorrent.exe (vcpkg x64-windows-static
-# including Qt6), driven by emule_workspace -- the same build logic used locally.
-# The first cold run builds static Qt6 from source and takes 1-2h; the vcpkg GHA
-# binary cache makes subsequent runs much faster.
+# Produces a qBittorrentBB folder build like upstream qBittorrent: qbittorrent.exe
+# plus its runtime DLLs (Qt6 via aqt + OpenSSL/zlib/libtorrent) and the Qt plugins,
+# zipped with a manifest + SBOM. This deliberately avoids the fully-static
+# single-exe path (vcpkg static Qt6 is a multi-hour rabbit hole and upstream
+# qBittorrent itself ships a folder, not a single static exe).
 #
-# Requires an org-scoped token (secrets.EMULEBB_CI_PAT) to check out the sibling
-# private forks emulebb-libtorrent and emulebb-build.
+# Requires an org-scoped token (secrets.EMULEBB_CI_PAT) for the sibling private
+# forks emulebb-libtorrent and emulebb-build.
 
-# Manual-only for now: the cold static-Qt build is long and needs the
-# EMULEBB_CI_PAT secret for the sibling private-fork checkouts. Once the first
-# dispatch is green and the secret is configured, enable a push(master) trigger.
 on:
   workflow_dispatch:
     inputs:
@@ -27,23 +25,21 @@ concurrency:
 
 jobs:
   build:
-    name: Static build (x64)
+    name: Windows folder build (x64)
     runs-on: windows-2022
-    timeout-minutes: 360
+    timeout-minutes: 120
     permissions:
       actions: write  # vcpkg GHA binary cache (x-gha)
 
     env:
-      triplet: x64-windows-static
+      triplet: x64-windows  # dynamic deps for libtorrent (boost/openssl/zlib)
 
     steps:
       - name: Resolve output root
-        # runner.* context is not available in job-level env, so derive the
-        # generated-output root from RUNNER_TEMP here and export it for later steps.
         run: echo "OUTPUT_ROOT=$env:RUNNER_TEMP\emulebb_out" >> $env:GITHUB_ENV
 
       - name: Setup MSVC dev environment
-        # Puts the MSVC toolchain (incl. dumpbin) on PATH for later steps.
+        # Puts the MSVC toolchain (incl. dumpbin, used by the packager) on PATH.
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -80,6 +76,15 @@ jobs:
       - name: Install emule_workspace
         run: pip install .\emulebb-build
 
+      - name: Install Qt (dynamic, aqt)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.1"
+          arch: win64_msvc2022_64
+          archives: qtbase qtsvg qttools
+          modules: qtimageformats
+          cache: true
+
       # https://learn.microsoft.com/en-us/vcpkg/users/binarycaching#gha
       - name: Set up vcpkg GHA binary cache
         uses: actions/github-script@v7
@@ -88,15 +93,9 @@ jobs:
             core.exportVariable('ACTIONS_CACHE_URL', (process.env.ACTIONS_CACHE_URL || ''));
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', (process.env.ACTIONS_RUNTIME_TOKEN || ''));
 
-      # Engine (libtorrent) deps only -- boost/openssl/zlib, NOT Qt. These are
-      # small and build/cache fast, so the engine stage below can fail fast.
       - name: Install engine deps with vcpkg (boost/openssl/zlib)
         run: |
           $env:VCPKG_BINARY_SOURCES = "clear;x-gha,readwrite"
-          # Boost closure libtorrent actually includes (enumerated from its
-          # headers): asio, system, optional, variant, multiprecision, multi-index,
-          # crc, smart-ptr (shared_array), utility, predef, logic, range, pool,
-          # intrusive, functional, date-time. Most pull their own transitive deps.
           $packages = @(
             "openssl",
             "zlib",
@@ -123,35 +122,7 @@ jobs:
             --clean-after-build `
             $packages
 
-      # Build the engine first: surfaces libtorrent compile errors in minutes,
-      # before paying the slow static-Qt build.
-      - name: Build static libtorrent (engine)
-        env:
-          EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
-          EMULEBB_LIBTORRENT_REPO: ${{ github.workspace }}\emulebb-libtorrent
-          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ env.OUTPUT_ROOT }}
-        run: |
-          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
-          python -m emule_workspace build qbittorrentbb-ci --static --stage libtorrent
-
-      # Qt6 static (the slow part) -- only reached once the engine compiles.
-      # Restored from the GHA binary cache after the first cold build. The app
-      # configure uses classic mode (CMAKE_FIND_PACKAGE_TARGETS_GLOBAL=ON resolves
-      # Qt's Wrap targets' references to ZLIB::ZLIB/PNG::PNG/Freetype across scopes).
-      - name: Install Qt with vcpkg (static)
-        run: |
-          $env:VCPKG_BINARY_SOURCES = "clear;x-gha,readwrite"
-          $packages = @(
-            "qtbase[widgets,network,sql-sqlite]",
-            "qttools",
-            "qtsvg"
-          )
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
-            --triplet $env:triplet `
-            --clean-after-build `
-            $packages
-
-      - name: Build static qbittorrent.exe (app)
+      - name: Build qbittorrent.exe (dynamic Qt + libtorrent)
         env:
           EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
           EMULEBB_LIBTORRENT_REPO: ${{ github.workspace }}\emulebb-libtorrent
@@ -160,7 +131,8 @@ jobs:
           # VCPKG_INSTALLATION_ROOT is a runner OS env var (not the workflow env
           # context), so wire VCPKG_ROOT here for emule_workspace's toolchain lookup.
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
-          python -m emule_workspace build qbittorrentbb-ci --static --stage qbittorrent
+          $env:EMULEBB_QT_PREFIX = $env:Qt_ROOT_DIR
+          python -m emule_workspace build qbittorrentbb-ci --dynamic
 
       - name: Dump build logs on failure
         if: failure()
@@ -181,32 +153,35 @@ jobs:
           path: ${{ env.OUTPUT_ROOT }}\logs
           if-no-files-found: ignore
 
-      - name: Verify single self-contained exe
-        run: |
-          $exe = "$env:OUTPUT_ROOT\builds\qbittorrentbb\Release\qbittorrent.exe"
-          if (-not (Test-Path $exe)) { throw "qbittorrent.exe not found at $exe" }
-          $deps = & dumpbin /dependents $exe
-          Write-Host $deps
-          $forbidden = $deps | Select-String -Pattern "Qt6.*\.dll|torrent-rasterbar.*\.dll|libssl.*\.dll|libcrypto.*\.dll|zlib1\.dll" -AllMatches
-          if ($forbidden) {
-            throw "Dynamic dependency on a bundled library detected -- not a self-contained static build."
-          }
-          Write-Host "OK: statically linked single exe."
-
-      - name: Package (ZIP + manifest + SBOM, unsigned)
+      - name: Package (folder: ZIP + manifest + SBOM, unsigned)
         env:
           EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
           EMULEBB_LIBTORRENT_REPO: ${{ github.workspace }}\emulebb-libtorrent
           EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ env.OUTPUT_ROOT }}
-        run: >
-          python -m emule_workspace package-qbittorrentbb
-          --release-version "${{ github.event.inputs.release_version || '0.0.0-dev' }}"
-          --clean
+        run: |
+          $env:EMULEBB_QT_PREFIX = $env:Qt_ROOT_DIR
+          python -m emule_workspace package-qbittorrentbb `
+            --release-version "${{ github.event.inputs.release_version || '0.0.0-dev' }}" `
+            --clean
+
+      - name: Verify the package has the runtime it needs
+        run: |
+          $stage = Get-ChildItem -Recurse -Directory "$env:OUTPUT_ROOT\release" -Filter qBittorrentBB | Select-Object -First 1
+          if (-not $stage) { throw "staged qBittorrentBB folder not found" }
+          $root = $stage.FullName
+          $required = @(
+            "qbittorrent.exe", "Qt6Core.dll", "Qt6Widgets.dll", "Qt6Network.dll",
+            "torrent-rasterbar.dll", "qt.conf",
+            "plugins\platforms\qwindows.dll", "plugins\sqldrivers\qsqlite.dll"
+          )
+          $missing = $required | Where-Object { -not (Test-Path (Join-Path $root $_)) }
+          if ($missing) { throw "package is missing required runtime: $($missing -join ', ')" }
+          Write-Host "OK: folder package has exe + Qt runtime + plugins."
 
       - name: Upload release package
         uses: actions/upload-artifact@v4
         with:
-          name: qbittorrentbb-static-x64
+          name: qbittorrentbb-windows-x64
           path: |
             ${{ env.OUTPUT_ROOT }}\release\**\*.zip
             ${{ env.OUTPUT_ROOT }}\release\**\*.manifest.json
