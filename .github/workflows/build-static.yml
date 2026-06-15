@@ -128,6 +128,25 @@ jobs:
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
           python -m emule_workspace build qbittorrentbb-ci --static
 
+      - name: Dump build logs on failure
+        if: failure()
+        run: |
+          $logRoot = "$env:OUTPUT_ROOT\logs"
+          if (Test-Path $logRoot) {
+            Get-ChildItem -Recurse -Filter *.log $logRoot | ForEach-Object {
+              Write-Host "===== $($_.FullName) ====="
+              Get-Content $_.FullName -Tail 250
+            }
+          }
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: ${{ env.OUTPUT_ROOT }}\logs
+          if-no-files-found: ignore
+
       - name: Verify single self-contained exe
         run: |
           $exe = "$env:OUTPUT_ROOT\builds\qbittorrentbb\Release\qbittorrent.exe"
