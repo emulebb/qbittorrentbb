@@ -5,7 +5,11 @@
 #include <libtorrent/torrent_flags.hpp>
 #include <libtorrent/torrent_info.hpp>
 
+#include <utility>
+
 #include <QHostAddress>
+#include <QList>
+#include <QMutex>
 #include <QStringList>
 
 #include "base/net/geoipmanager.h"
@@ -100,6 +104,66 @@ void drop_connection(lt::peer_connection_handle ph)
   ph.disconnect(boost::asio::error::connection_refused, lt::operation_t::bittorrent, lt::disconnect_severity_t{0});
 }
 
+// qBittorrentBB: thread-safe sink for auto-ban events. The peer-filter plugins
+// run on the libtorrent network thread, so they only *record* a ban here; the
+// session drains this on the GUI thread (in readAlerts) and reports each entry
+// through qBittorrent's dedicated peer log, exactly as peer_blocked_alert events
+// are logged. This keeps every Logger call on the GUI thread.
+struct BannedPeerEvent
+{
+  QString ip;
+  QString reason;
+};
+
+class AutoBanLog
+{
+public:
+  void record(const QString& ip, const QString& reason)
+  {
+    const QMutexLocker locker {&m_mutex};
+    m_pending.append({ip, reason});
+  }
+
+  QList<BannedPeerEvent> drain()
+  {
+    const QMutexLocker locker {&m_mutex};
+    return std::exchange(m_pending, {});
+  }
+
+private:
+  QMutex m_mutex;
+  QList<BannedPeerEvent> m_pending;
+};
+
+inline AutoBanLog g_autoBanLog;
+
+inline void record_peer_ban(const lt::peer_connection_handle& ph, const QString& reason)
+{
+  g_autoBanLog.record(QString::fromStdString(ph.remote().address().to_string()), reason);
+}
+
+// Drop action that records the ban (with a human-readable reason) then disconnects.
+inline action_function make_logging_drop(const QString& reason)
+{
+  return [reason](lt::peer_connection_handle ph)
+  {
+    record_peer_ban(ph, reason);
+    drop_connection(ph);
+  };
+}
+
+// Country-block drop action that resolves and includes the peer's country code.
+inline action_function make_country_block_drop()
+{
+  return [](lt::peer_connection_handle ph)
+  {
+    lt::peer_info info;
+    ph.get_peer_info(info);
+    record_peer_ban(ph, QStringLiteral("Auto-banned: blocked country (%1)").arg(peer_country(info)));
+    drop_connection(ph);
+  };
+}
+
 
 template<typename F>
 auto wrap_filter(F filter)
@@ -135,26 +199,26 @@ std::shared_ptr<lt::torrent_plugin> create_peer_action_plugin(
 
 std::shared_ptr<lt::torrent_plugin> create_drop_bad_peers_plugin(lt::torrent_handle const& th, client_data)
 {
-  return create_peer_action_plugin(th, wrap_filter(is_bad_peer), drop_connection);
+  return create_peer_action_plugin(th, wrap_filter(is_bad_peer), make_logging_drop(QStringLiteral("Auto-banned: abusive client")));
 }
 
 std::shared_ptr<lt::torrent_plugin> create_drop_unknown_peers_plugin(lt::torrent_handle const& th, client_data)
 {
-  return create_peer_action_plugin(th, wrap_filter(is_unknown_peer), drop_connection);
+  return create_peer_action_plugin(th, wrap_filter(is_unknown_peer), make_logging_drop(QStringLiteral("Auto-banned: unknown client")));
 }
 
 std::shared_ptr<lt::torrent_plugin> create_drop_offline_downloader_plugin(lt::torrent_handle const& th, client_data)
 {
-  return create_peer_action_plugin(th, wrap_filter(is_offline_downloader), drop_connection);
+  return create_peer_action_plugin(th, wrap_filter(is_offline_downloader), make_logging_drop(QStringLiteral("Auto-banned: offline downloader")));
 }
 
 std::shared_ptr<lt::torrent_plugin> create_drop_bittorrent_media_player_plugin(lt::torrent_handle const& th, client_data)
 {
-  return create_peer_action_plugin(th, wrap_filter(is_bittorrent_media_player), drop_connection);
+  return create_peer_action_plugin(th, wrap_filter(is_bittorrent_media_player), make_logging_drop(QStringLiteral("Auto-banned: BitTorrent media player")));
 }
 
 // qBittorrentBB addition: whole-country block plugin.
 std::shared_ptr<lt::torrent_plugin> create_drop_blocked_country_plugin(lt::torrent_handle const& th, client_data)
 {
-  return create_peer_action_plugin(th, wrap_filter(is_blocked_country), drop_connection);
+  return create_peer_action_plugin(th, wrap_filter(is_blocked_country), make_country_block_drop());
 }

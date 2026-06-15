@@ -6086,6 +6086,11 @@ void SessionImpl::readAlerts()
 
     // Some torrents may become "finished" after different alerts handling.
     processPendingFinishedTorrents();
+
+    // qBittorrentBB: report queued auto-ban events through the dedicated peer log
+    // on this (GUI) thread, mirroring how peer_blocked_alert events are logged.
+    for (const BannedPeerEvent &event : g_autoBanLog.drain())
+        Logger::instance()->addPeer(event.ip, true, event.reason);
 }
 
 void SessionImpl::handleAddTorrentAlert(const lt::add_torrent_alert *alert)
