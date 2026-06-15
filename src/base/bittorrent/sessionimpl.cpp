@@ -955,7 +955,7 @@ void SessionImpl::setAutoBanBlockedCountries(const QStringList &countries)
     g_autoBanPolicy.blockedCountries = countries;
 }
 
-QList<HarvestSearchResult> SessionImpl::searchDHTIndex(const QString &query, const int limit) const
+HarvestSearchPage SessionImpl::searchDHTIndex(const QString &query, const int limit, const int offset) const
 {
     if (!m_dhtHarvester)
         return {};
@@ -964,13 +964,13 @@ QList<HarvestSearchResult> SessionImpl::searchDHTIndex(const QString &query, con
     if (!store)
         return {};
 
-    QList<HarvestSearchResult> results;
-    QMetaObject::invokeMethod(store, [store, query, limit] { return store->search(query, limit); }
-        , Qt::BlockingQueuedConnection, &results);
-    return results;
+    HarvestSearchPage page;
+    QMetaObject::invokeMethod(store, [store, query, limit, offset] { return store->search(query, limit, offset); }
+        , Qt::BlockingQueuedConnection, &page);
+    return page;
 }
 
-QList<HarvestSearchResult> SessionImpl::recentDHTIndex(const int limit) const
+HarvestSearchPage SessionImpl::recentDHTIndex(const int limit, const int offset) const
 {
     if (!m_dhtHarvester)
         return {};
@@ -979,10 +979,10 @@ QList<HarvestSearchResult> SessionImpl::recentDHTIndex(const int limit) const
     if (!store)
         return {};
 
-    QList<HarvestSearchResult> results;
-    QMetaObject::invokeMethod(store, [store, limit] { return store->recent(limit); }
-        , Qt::BlockingQueuedConnection, &results);
-    return results;
+    HarvestSearchPage page;
+    QMetaObject::invokeMethod(store, [store, limit, offset] { return store->recent(limit, offset); }
+        , Qt::BlockingQueuedConnection, &page);
+    return page;
 }
 
 QByteArray SessionImpl::dhtTorrentMetadata(const QString &infoHashV1) const

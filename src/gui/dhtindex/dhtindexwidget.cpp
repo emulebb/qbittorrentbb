@@ -204,7 +204,7 @@ void DHTIndexWidget::refreshStats()
     // Live feed: while no search is active, keep showing the most recent indexed
     // torrents as they come in (capped).
     if (m_searchEdit->text().trimmed().isEmpty())
-        setRows(BitTorrent::Session::instance()->recentDHTIndex(FEED_LIMIT));
+        setRows(BitTorrent::Session::instance()->recentDHTIndex(FEED_LIMIT, 0).items);
 }
 
 void DHTIndexWidget::search()
@@ -212,10 +212,10 @@ void DHTIndexWidget::search()
     const QString query = m_searchEdit->text().trimmed();
     if (query.isEmpty())
     {
-        setRows(BitTorrent::Session::instance()->recentDHTIndex(FEED_LIMIT));
+        setRows(BitTorrent::Session::instance()->recentDHTIndex(FEED_LIMIT, 0).items);
         return;
     }
-    setRows(BitTorrent::Session::instance()->searchDHTIndex(query, SEARCH_LIMIT));
+    setRows(BitTorrent::Session::instance()->searchDHTIndex(query, SEARCH_LIMIT, 0).items);
 }
 
 void DHTIndexWidget::setRows(const QList<BitTorrent::HarvestSearchResult> &results)
