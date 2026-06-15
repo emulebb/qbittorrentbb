@@ -179,8 +179,31 @@ namespace
         I2P_OUTBOUND_LENGTH,
 #endif
 
+        // qBittorrentBB auto-ban section (upload-only; applied on next session start)
+        AUTOBAN_HEADER,
+        AUTOBAN_UNKNOWN_PEER,
+        AUTOBAN_BT_PLAYER_PEER,
+        AUTOBAN_UNKNOWN_EVERYWHERE,
+        AUTOBAN_UNKNOWN_COUNTRIES,
+        AUTOBAN_BLOCKED_COUNTRIES,
+        SHADOW_BAN,
+
         ROW_COUNT
     };
+
+    QStringList parseCountryCodes(const QString &text)
+    {
+        // Normalizes a comma-separated list into unique upper-case ISO codes.
+        QStringList codes;
+        const QStringList parts = text.split(u',', Qt::SkipEmptyParts);
+        for (const QString &part : parts)
+        {
+            const QString code = part.trimmed().toUpper();
+            if (!code.isEmpty() && !codes.contains(code))
+                codes.append(code);
+        }
+        return codes;
+    }
 }
 
 AdvancedSettings::AdvancedSettings(IGUIApplication *app, QWidget *parent)
@@ -381,6 +404,14 @@ void AdvancedSettings::saveAdvancedSettings() const
 #endif
 
     session->setTorrentContentRemoveOption(m_comboBoxTorrentContentRemoveOption.currentData().value<BitTorrent::TorrentContentRemoveOption>());
+
+    // qBittorrentBB auto-ban (upload-only; applied on next session start)
+    session->setAutoBanUnknownPeerEnabled(m_checkBoxAutoBanUnknownPeer.isChecked());
+    session->setAutoBanBTPlayerPeerEnabled(m_checkBoxAutoBanBTPlayerPeer.isChecked());
+    session->setAutoBanUnknownEverywhereEnabled(m_checkBoxAutoBanUnknownEverywhere.isChecked());
+    session->setAutoBanUnknownCountries(parseCountryCodes(m_lineEditAutoBanUnknownCountries.text()));
+    session->setAutoBanBlockedCountries(parseCountryCodes(m_lineEditAutoBanBlockedCountries.text()));
+    session->setShadowBanEnabled(m_checkBoxShadowBan.isChecked());
 }
 
 #ifndef QBT_USES_LIBTORRENT2
@@ -1001,6 +1032,34 @@ void AdvancedSettings::loadAdvancedSettings()
     addRow(I2P_OUTBOUND_LENGTH, (tr("I2P outbound length") + u' ' + makeLink(u"https://www.libtorrent.org/reference-Settings.html#i2p_outbound_length", u"(?)"))
         , &m_spinBoxI2POutboundLength);
 #endif
+
+    // qBittorrentBB auto-ban section. These bans apply to upload only (the DHT
+    // harvester is exempt) and are evaluated by libtorrent peer-filter plugins
+    // registered once at session start, so changes require a session restart.
+    auto *labelAutoBanNote = new QLabel(tr("Bans apply to upload only. Changes require a session restart."), this);
+    labelAutoBanNote->setWordWrap(true);
+    addRow(AUTOBAN_HEADER, u"<b>%1</b>"_s.arg(tr("Auto-ban Section")), labelAutoBanNote);
+    static_cast<QLabel *>(cellWidget(AUTOBAN_HEADER, PROPERTY))->setAlignment(Qt::AlignCenter | Qt::AlignVCenter);
+
+    m_checkBoxAutoBanUnknownPeer.setChecked(session->isAutoBanUnknownPeerEnabled());
+    addRow(AUTOBAN_UNKNOWN_PEER, tr("Auto ban unknown clients and offline downloaders"), &m_checkBoxAutoBanUnknownPeer);
+
+    m_checkBoxAutoBanBTPlayerPeer.setChecked(session->isAutoBanBTPlayerPeerEnabled());
+    addRow(AUTOBAN_BT_PLAYER_PEER, tr("Auto ban BitTorrent media player clients"), &m_checkBoxAutoBanBTPlayerPeer);
+
+    m_checkBoxAutoBanUnknownEverywhere.setChecked(session->isAutoBanUnknownEverywhereEnabled());
+    addRow(AUTOBAN_UNKNOWN_EVERYWHERE, tr("Ban unknown clients from any country (otherwise only the list below)"), &m_checkBoxAutoBanUnknownEverywhere);
+
+    m_lineEditAutoBanUnknownCountries.setPlaceholderText(tr("ISO country codes, e.g. CN, RU"));
+    m_lineEditAutoBanUnknownCountries.setText(session->autoBanUnknownCountries().join(u", "_s));
+    addRow(AUTOBAN_UNKNOWN_COUNTRIES, tr("Ban unknown clients only from these countries (requires country resolution)"), &m_lineEditAutoBanUnknownCountries);
+
+    m_lineEditAutoBanBlockedCountries.setPlaceholderText(tr("ISO country codes, e.g. CN, RU"));
+    m_lineEditAutoBanBlockedCountries.setText(session->autoBanBlockedCountries().join(u", "_s));
+    addRow(AUTOBAN_BLOCKED_COUNTRIES, tr("Ban all clients from these countries (requires country resolution)"), &m_lineEditAutoBanBlockedCountries);
+
+    m_checkBoxShadowBan.setChecked(session->isShadowBanEnabled());
+    addRow(SHADOW_BAN, tr("Shadow ban (stay connected to banned peers but send no data)"), &m_checkBoxShadowBan);
 }
 
 template <typename T>
