@@ -1,0 +1,32 @@
+{
+  "name": "qbittorrentbb",
+  "version-string": "0.0.0",
+  "description": "qBittorrentBB static dependency manifest (used for the fully-static vcpkg build).",
+  "dependencies": [
+    {
+      "name": "qtbase",
+      "features": ["widgets", "network", "sql-sqlite"]
+    },
+    "qttools",
+    "qtsvg",
+    "openssl",
+    "zlib",
+    "boost-asio",
+    "boost-system",
+    "boost-optional",
+    "boost-variant",
+    "boost-multiprecision",
+    "boost-multi-index",
+    "boost-crc",
+    "boost-smart-ptr",
+    "boost-utility",
+    "boost-predef",
+    "boost-logic",
+    "boost-range",
+    "boost-pool",
+    "boost-intrusive",
+    "boost-functional",
+    "boost-date-time",
+    "boost-circular-buffer"
+  ]
+}
