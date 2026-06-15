@@ -35,9 +35,19 @@ jobs:
 
     env:
       triplet: x64-windows-static
-      output_root: ${{ runner.temp }}\emulebb_out
 
     steps:
+      - name: Resolve output root
+        # runner.* context is not available in job-level env, so derive the
+        # generated-output root from RUNNER_TEMP here and export it for later steps.
+        run: echo "OUTPUT_ROOT=$env:RUNNER_TEMP\emulebb_out" >> $env:GITHUB_ENV
+
+      - name: Setup MSVC dev environment
+        # Puts the MSVC toolchain (incl. dumpbin) on PATH for later steps.
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Checkout qbittorrentbb
         uses: actions/checkout@v4
         with:
@@ -111,7 +121,7 @@ jobs:
         env:
           EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
           EMULEBB_LIBTORRENT_REPO: ${{ github.workspace }}\emulebb-libtorrent
-          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ env.output_root }}
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ env.OUTPUT_ROOT }}
         run: |
           # VCPKG_INSTALLATION_ROOT is a runner OS env var (not the workflow env
           # context), so wire VCPKG_ROOT here for emule_workspace's toolchain lookup.
@@ -120,7 +130,7 @@ jobs:
 
       - name: Verify single self-contained exe
         run: |
-          $exe = "$env:output_root\builds\qbittorrentbb\Release\qbittorrent.exe"
+          $exe = "$env:OUTPUT_ROOT\builds\qbittorrentbb\Release\qbittorrent.exe"
           if (-not (Test-Path $exe)) { throw "qbittorrent.exe not found at $exe" }
           $deps = & dumpbin /dependents $exe
           Write-Host $deps
@@ -134,7 +144,7 @@ jobs:
         env:
           EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
           EMULEBB_LIBTORRENT_REPO: ${{ github.workspace }}\emulebb-libtorrent
-          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ env.output_root }}
+          EMULEBB_WORKSPACE_OUTPUT_ROOT: ${{ env.OUTPUT_ROOT }}
         run: >
           python -m emule_workspace package-qbittorrentbb
           --release-version "${{ github.event.inputs.release_version || '0.0.0-dev' }}"
@@ -145,7 +155,7 @@ jobs:
         with:
           name: qbittorrentbb-static-x64
           path: |
-            ${{ env.output_root }}\release\**\*.zip
-            ${{ env.output_root }}\release\**\*.manifest.json
-            ${{ env.output_root }}\release\**\*.sbom.spdx.json
+            ${{ env.OUTPUT_ROOT }}\release\**\*.zip
+            ${{ env.OUTPUT_ROOT }}\release\**\*.manifest.json
+            ${{ env.OUTPUT_ROOT }}\release\**\*.sbom.spdx.json
           if-no-files-found: error
