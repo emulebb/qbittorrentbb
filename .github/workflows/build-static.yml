@@ -153,7 +153,7 @@ jobs:
           path: ${{ env.OUTPUT_ROOT }}\logs
           if-no-files-found: ignore
 
-      - name: Package (folder: ZIP + manifest + SBOM, unsigned)
+      - name: "Package (folder ZIP + manifest + SBOM, unsigned)"
         env:
           EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
           EMULEBB_LIBTORRENT_REPO: ${{ github.workspace }}\emulebb-libtorrent
