@@ -95,16 +95,28 @@ QByteArray TorznabController::buildCaps() const
     {
         xml.writeStartElement(mode);
         xml.writeAttribute(u"available"_s, u"yes"_s);
-        xml.writeAttribute(u"supportedParams"_s, u"q"_s);
+        // We key only on the text query and echo the caller's category back; we
+        // do not filter by season/ep/year, so we advertise only what we honor.
+        xml.writeAttribute(u"supportedParams"_s, u"q,cat"_s);
         xml.writeEndElement();
     }
     xml.writeEndElement();  // searching
 
+    // Advertise the top-level category set so *Arr callers (Radarr 2000,
+    // Sonarr 5000, Lidarr 3000, ...) will configure and query this indexer. The
+    // DHT index has no per-item category metadata; per-item categories are
+    // echoed from the request (see buildResults).
     xml.writeStartElement(u"categories"_s);
-    xml.writeStartElement(u"category"_s);
-    xml.writeAttribute(u"id"_s, OTHER_CATEGORY);
-    xml.writeAttribute(u"name"_s, u"Other"_s);
-    xml.writeEndElement();
+    for (const auto &[id, name] : {std::pair {u"2000"_s, u"Movies"_s}, std::pair {u"3000"_s, u"Audio"_s},
+                                   std::pair {u"4000"_s, u"PC"_s}, std::pair {u"5000"_s, u"TV"_s},
+                                   std::pair {u"6000"_s, u"XXX"_s}, std::pair {u"7000"_s, u"Books"_s},
+                                   std::pair {u"8000"_s, u"Other"_s}})
+    {
+        xml.writeStartElement(u"category"_s);
+        xml.writeAttribute(u"id"_s, id);
+        xml.writeAttribute(u"name"_s, name);
+        xml.writeEndElement();
+    }
     xml.writeEndElement();  // categories
 
     xml.writeEndElement();  // caps
