@@ -216,8 +216,8 @@ namespace BitTorrent
         void setAutoBanUnknownCountries(const QStringList &countries) override;
         QStringList autoBanBlockedCountries() const override;
         void setAutoBanBlockedCountries(const QStringList &countries) override;
-        QList<HarvestSearchResult> searchDHTIndex(const QString &query, int limit) const override;
-        QList<HarvestSearchResult> recentDHTIndex(int limit) const override;
+        HarvestSearchPage searchDHTIndex(const QString &query, int limit, int offset) const override;
+        HarvestSearchPage recentDHTIndex(int limit, int offset) const override;
         QByteArray dhtTorrentMetadata(const QString &infoHashV1) const override;
         void connectDHTMetadataPeer(const QString &infoHashV1, const QString &ip, int port) override;
         HarvestStats dhtHarvestStats() const override;

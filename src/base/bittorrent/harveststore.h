@@ -81,6 +81,12 @@ namespace BitTorrent
         bool metadataFetched = false;
     };
 
+    struct HarvestSearchPage
+    {
+        QList<HarvestSearchResult> items;
+        qint64 total = 0;  // full count across all pages, for paginated callers
+    };
+
     struct HarvestStats
     {
         qint64 torrentCount = 0;     // distinct infohashes seen
@@ -127,8 +133,8 @@ namespace BitTorrent
         void updateSwarm(const QString &infoHashV1, int peers);
 
         // Readers (may be invoked via BlockingQueuedConnection from the GUI).
-        QList<BitTorrent::HarvestSearchResult> search(const QString &query, int limit) const;
-        QList<BitTorrent::HarvestSearchResult> recent(int limit) const;
+        BitTorrent::HarvestSearchPage search(const QString &query, int limit, int offset) const;
+        BitTorrent::HarvestSearchPage recent(int limit, int offset) const;
         QByteArray metadataFor(const QString &infoHashV1) const;
         BitTorrent::HarvestStats stats() const;
 

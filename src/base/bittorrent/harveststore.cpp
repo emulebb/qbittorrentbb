@@ -423,15 +423,23 @@ bool HarvestStore::needsMetadata(const QString &infoHashV1) const
     return true;
 }
 
-QList<HarvestSearchResult> HarvestStore::search(const QString &queryText, int limit) const
+HarvestSearchPage HarvestStore::search(const QString &queryText, int limit, int offset) const
 {
-    QList<HarvestSearchResult> results;
+    HarvestSearchPage page;
 
     const QString match = toFtsMatch(normalizeText(queryText));
     if (match.isEmpty())
-        return results;
+        return page;
 
     auto db = QSqlDatabase::database(m_connectionName);
+
+    // Full match count across all pages (for the paginated response total).
+    QSqlQuery countQuery {db};
+    countQuery.prepare(u"SELECT count(*) FROM torrent_name_fts WHERE torrent_name_fts MATCH :match;"_s);
+    countQuery.bindValue(u":match"_s, match);
+    if (countQuery.exec() && countQuery.next())
+        page.total = countQuery.value(0).toLongLong();
+
     QSqlQuery query {db};
     query.prepare(u"SELECT t.infohash_v1, t.name, t.size_bytes, t.file_count,"
                   u" t.first_seen_ms, t.last_seen_ms, t.metadata_fetched, t.swarm_peers,"
@@ -440,13 +448,14 @@ QList<HarvestSearchResult> HarvestStore::search(const QString &queryText, int li
                   u" JOIN torrents t ON t.id = f.rowid"
                   u" WHERE torrent_name_fts MATCH :match"
                   u" ORDER BY bm25(torrent_name_fts), t.availability_score DESC, t.last_seen_ms DESC"
-                  u" LIMIT :limit;"_s);
+                  u" LIMIT :limit OFFSET :offset;"_s);
     query.bindValue(u":match"_s, match);
     query.bindValue(u":limit"_s, limit);
+    query.bindValue(u":offset"_s, offset);
     if (!query.exec())
     {
         LogMsg(QObject::tr("DHT harvest: search failed. %1").arg(query.lastError().text()), Log::WARNING);
-        return results;
+        return page;
     }
 
     while (query.next())
@@ -461,17 +470,24 @@ QList<HarvestSearchResult> HarvestStore::search(const QString &queryText, int li
         row.metadataFetched = (query.value(6).toInt() != 0);
         row.peers = query.value(7).toInt();
         row.sightings = query.value(8).toInt();
-        results.append(row);
+        page.items.append(row);
     }
 
-    return results;
+    return page;
 }
 
-QList<HarvestSearchResult> HarvestStore::recent(int limit) const
+HarvestSearchPage HarvestStore::recent(int limit, int offset) const
 {
-    QList<HarvestSearchResult> results;
+    HarvestSearchPage page;
 
     auto db = QSqlDatabase::database(m_connectionName);
+
+    // Full count of metadata-complete torrents (for the paginated response total).
+    QSqlQuery countQuery {db};
+    countQuery.prepare(u"SELECT count(*) FROM torrents WHERE metadata_fetched = 1;"_s);
+    if (countQuery.exec() && countQuery.next())
+        page.total = countQuery.value(0).toLongLong();
+
     QSqlQuery query {db};
     query.prepare(u"SELECT t.infohash_v1, t.name, t.size_bytes, t.file_count,"
                   u" t.first_seen_ms, t.last_seen_ms, t.metadata_fetched, t.swarm_peers,"
@@ -479,10 +495,11 @@ QList<HarvestSearchResult> HarvestStore::recent(int limit) const
                   u" FROM torrents t"
                   u" WHERE t.metadata_fetched = 1"
                   u" ORDER BY t.updated_at_ms DESC"
-                  u" LIMIT :limit;"_s);
+                  u" LIMIT :limit OFFSET :offset;"_s);
     query.bindValue(u":limit"_s, limit);
+    query.bindValue(u":offset"_s, offset);
     if (!query.exec())
-        return results;
+        return page;
 
     while (query.next())
     {
@@ -496,10 +513,10 @@ QList<HarvestSearchResult> HarvestStore::recent(int limit) const
         row.metadataFetched = (query.value(6).toInt() != 0);
         row.peers = query.value(7).toInt();
         row.sightings = query.value(8).toInt();
-        results.append(row);
+        page.items.append(row);
     }
 
-    return results;
+    return page;
 }
 
 QByteArray HarvestStore::metadataFor(const QString &infoHashV1) const
