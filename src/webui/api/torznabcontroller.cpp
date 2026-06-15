@@ -219,6 +219,11 @@ QByteArray TorznabController::buildResults() const
         writeTorznabAttr(xml, u"magneturl"_s, magnet);
         writeTorznabAttr(xml, u"seeders"_s, swarmCount);
         writeTorznabAttr(xml, u"peers"_s, swarmCount);
+        // Public-swarm defaults: no ratio accounting, unknown grab count. Some
+        // *Arr setups require the volume factors to make a grab decision.
+        writeTorznabAttr(xml, u"grabs"_s, u"0"_s);
+        writeTorznabAttr(xml, u"downloadvolumefactor"_s, u"1"_s);
+        writeTorznabAttr(xml, u"uploadvolumefactor"_s, u"1"_s);
 
         xml.writeEndElement();  // item
     }
