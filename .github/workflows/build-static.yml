@@ -134,20 +134,10 @@ jobs:
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
           python -m emule_workspace build qbittorrentbb-ci --static --stage libtorrent
 
-      # Qt6 static (the slow part) -- only reached once the engine compiles.
-      - name: Install Qt with vcpkg (static)
-        run: |
-          $env:VCPKG_BINARY_SOURCES = "clear;x-gha,readwrite"
-          $packages = @(
-            "qtbase[widgets,network,sql-sqlite]",
-            "qttools",
-            "qtsvg"
-          )
-          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
-            --triplet $env:triplet `
-            --clean-after-build `
-            $packages
-
+      # Qt6 static (the slow part) is installed here via vcpkg manifest mode
+      # (qbittorrentbb/vcpkg.json) during the app configure -- restored from the
+      # GHA binary cache, so this is fast once Qt has been built once. Manifest
+      # mode resolves Qt's transitive image/font deps (zlib/png/freetype) reliably.
       - name: Build static qbittorrent.exe (app)
         env:
           EMULEBB_QBT_REPO: ${{ github.workspace }}\qbittorrentbb
@@ -157,6 +147,8 @@ jobs:
           # VCPKG_INSTALLATION_ROOT is a runner OS env var (not the workflow env
           # context), so wire VCPKG_ROOT here for emule_workspace's toolchain lookup.
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          # Let the manifest-mode install reuse the GHA binary cache (Qt etc.).
+          $env:VCPKG_BINARY_SOURCES = "clear;x-gha,readwrite"
           python -m emule_workspace build qbittorrentbb-ci --static --stage qbittorrent
 
       - name: Dump build logs on failure
