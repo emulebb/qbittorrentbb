@@ -16,6 +16,13 @@ on:
         description: "Package version: MAJOR.MINOR.PATCH[-suffix]"
         required: false
         default: "0.0.0-dev"
+  push:
+    branches: [master]
+    # Build automatically on real code changes (not docs / the workflow itself).
+    paths:
+      - "src/**"
+      - "CMakeLists.txt"
+      - "cmake/**"
 
 permissions: {}
 
