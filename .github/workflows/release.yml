@@ -27,7 +27,7 @@ jobs:
   build:
     name: Build
     needs: version
-    uses: ./.github/workflows/build-static.yml
+    uses: ./.github/workflows/build.yml
     with:
       release_version: ${{ needs.version.outputs.release_version }}
     secrets: inherit
