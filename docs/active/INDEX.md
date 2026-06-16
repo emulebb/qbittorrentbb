@@ -44,6 +44,7 @@ reused. Scan `docs/active/items` before allocating the next number.
 | [QBBB-FEAT-002](items/QBBB-FEAT-002.md) | Major | OPEN | Persist harvested torrents to a sharded local on-disk store |
 | [QBBB-FEAT-003](items/QBBB-FEAT-003.md) | Minor | OPEN | Indexer schema + Torznab contract parity with emulebb-rust |
 | [QBBB-FEAT-004](items/QBBB-FEAT-004.md) | Critical | OPEN | Make vpnReady() truly fail-closed (verify bound IP equals the tunnel) — release-blocking |
+| [QBBB-FEAT-005](items/QBBB-FEAT-005.md) | Major | OPEN | Docker — headless nox Linux build + GHCR image (suite bundle prerequisite) |
 
 ## Bugs (`BUG`)
 
