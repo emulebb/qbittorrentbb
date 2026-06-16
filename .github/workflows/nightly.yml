@@ -1,0 +1,63 @@
+name: Nightly - Windows (folder)
+
+# Daily folder build of qBittorrentBB so the dynamic build stays green over time
+# without needing a tag push. It reuses build.yml (the same recipe as CI and
+# releases), so there is zero drift between nightly, CI, and release artifacts.
+# Scheduled runs skip when master has not moved in the last day to avoid burning
+# CI minutes on an unchanged tree; a manual dispatch always builds.
+#
+# Distinct from nightly-upstream.yml (the inherited upstream qBittorrent nightly).
+
+on:
+  schedule:
+    # 04:37 UTC daily; off the top of the hour to dodge the scheduler backlog.
+    - cron: "37 4 * * *"
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  decide:
+    name: Decide whether to build
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      release_version: ${{ steps.check.outputs.release_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check recency and resolve nightly version
+        id: check
+        run: |
+          short="$(git rev-parse --short HEAD)"
+          stamp="$(date -u +%Y%m%d)"
+          # Packager accepts MAJOR.MINOR.PATCH[-suffix] (suffix: [0-9A-Za-z.-]+).
+          echo "release_version=0.0.0-nightly.${stamp}.${short}" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch: building."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "$(git log --since='25 hours ago' --oneline)" ]; then
+            echo "master moved in the last day: building."
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No commits in the last day: skipping nightly build."
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build
+    needs: decide
+    if: needs.decide.outputs.should_build == 'true'
+    uses: ./.github/workflows/build.yml
+    with:
+      release_version: ${{ needs.decide.outputs.release_version }}
+    secrets: inherit
