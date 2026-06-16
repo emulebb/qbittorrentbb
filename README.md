@@ -1,3 +1,20 @@
+# qBittorrentBB — the eMuleBB Suite BitTorrent companion
+
+**qBittorrentBB** is the eMuleBB organization's unofficial fork of qBittorrent
+(not affiliated with the upstream project). It is the **BitTorrent companion** in
+the [eMuleBB Suite](https://github.com/emulebb), beside the eD2K/Kad core
+(emulebb-rust / the eMuleBB MFC client) and the forward controller TrackMuleBB.
+Fork deltas over upstream: a DHT harvester + local SQLite index with a Torznab
+surface, branded library export, and VPN fail-closed binding (Windows hide.me
+split-tunnel; Docker Gluetun). It is coordinated by — but always runs standalone
+without — TrackMuleBB.
+
+Operating rules and binding policy: `AGENTS.md`. Suite context:
+`emulebb-tooling/docs/active/PRODUCT-PORTFOLIO.md`. The upstream qBittorrent
+README follows below (courtesy of the upstream project).
+
+---
+
 qBittorrent - A BitTorrent client in Qt
 ------------------------------------------
 
