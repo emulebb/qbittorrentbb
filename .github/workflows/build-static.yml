@@ -16,6 +16,19 @@ on:
         description: "Package version: MAJOR.MINOR.PATCH[-suffix]"
         required: false
         default: "0.0.0-dev"
+  # Reusable: release.yml calls this on a v* tag, then publishes the artifact as a
+  # GitHub Release. Kept separate from the push trigger because a `paths` filter
+  # would wrongly evaluate against the tag commit's parent and could skip the build.
+  workflow_call:
+    inputs:
+      release_version:
+        description: "Package version: MAJOR.MINOR.PATCH[-suffix]"
+        required: false
+        type: string
+        default: "0.0.0-dev"
+    secrets:
+      EMULEBB_CI_PAT:
+        required: true
   push:
     branches: [master]
     # Build automatically on real code changes (not docs / the workflow itself).
@@ -169,7 +182,7 @@ jobs:
         run: |
           $env:EMULEBB_QT_PREFIX = $env:Qt_ROOT_DIR
           python -m emule_workspace package-qbittorrentbb `
-            --release-version "${{ github.event.inputs.release_version || '0.0.0-dev' }}" `
+            --release-version "${{ inputs.release_version || '0.0.0-dev' }}" `
             --clean
 
       - name: Verify the package has the runtime it needs
