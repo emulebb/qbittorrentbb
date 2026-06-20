@@ -29,6 +29,7 @@
 #pragma once
 
 #include <QList>
+#include <QString>
 #include <QWidget>
 
 #include "base/bittorrent/harveststore.h"
@@ -74,4 +75,5 @@ private:
     TorrentContentWidget *m_content = nullptr;
     HarvestContentHandler *m_contentHandler = nullptr;
     QTimer *m_statsTimer = nullptr;
+    QString m_rowsSignature;
 };

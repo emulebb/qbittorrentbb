@@ -46,6 +46,7 @@ namespace BitTorrent
     class HarvestStore;
     class Session;
     class TorrentInfo;
+    struct HarvestSighting;
     struct HarvestStats;
 
     // Magnetico/btdigg-style BitTorrent DHT harvester.
@@ -91,6 +92,7 @@ namespace BitTorrent
         void onTimeoutTimer();
         void onScheduleTimer();   // pull persistent metadata candidates from the store
         void onPruneTimer();      // retention sweep
+        void flushSightings();
 
     private:
         void start();
@@ -116,11 +118,13 @@ namespace BitTorrent
         QSet<QString> m_queued;             // in m_pending or m_inFlight (dedupe)
         QHash<QString, qint64> m_inFlight;  // infoHashV1 -> fetch start (ms)
         QSet<QString> m_done;               // fetched this session
+        QList<HarvestSighting> m_sightingBuffer;
 
         QTimer *m_sampleTimer = nullptr;
         QTimer *m_timeoutTimer = nullptr;
         QTimer *m_scheduleTimer = nullptr;
         QTimer *m_pruneTimer = nullptr;
+        QTimer *m_sightingFlushTimer = nullptr;
         int m_sampleBudget = 0;  // per-tick cap on outstanding BEP-51 sample requests
     };
 }

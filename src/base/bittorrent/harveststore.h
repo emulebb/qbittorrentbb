@@ -72,6 +72,7 @@ namespace BitTorrent
     {
         QString infoHashV1;
         QString name;
+        QString contentType;
         qint64 size = 0;
         int fileCount = 0;
         qint64 firstSeenMs = 0;
@@ -127,6 +128,7 @@ namespace BitTorrent
 
         // Writers (invoked from the harvester, same thread).
         void recordSighting(const BitTorrent::HarvestSighting &sighting);
+        void recordSightings(const QList<BitTorrent::HarvestSighting> &sightings);
         void recordMetadata(const BitTorrent::HarvestedTorrent &torrent);
         void noteFetchFailure(const QString &infoHashV1);
         // Records the real DHT swarm size (peer count from a get_peers reply).

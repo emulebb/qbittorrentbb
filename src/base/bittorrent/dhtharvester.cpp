@@ -56,12 +56,12 @@ using namespace Qt::Literals::StringLiterals;
 namespace
 {
     // BEP-51 active-crawl cadence and per-tick fan-out.
-    const int SAMPLE_INTERVAL_MS = 4000;
-    const int MAX_SAMPLE_NODES_PER_TICK = 12;
+    const int SAMPLE_INTERVAL_MS = 8000;
+    const int MAX_SAMPLE_NODES_PER_TICK = 6;
     // Bounded keyspace traversal: how many sample requests may be outstanding per
     // tick (caps recursion) and how many returned nodes to recurse into per reply.
-    const int SAMPLE_BUDGET_PER_TICK = 48;
-    const int RECURSE_NODES_PER_SAMPLE = 3;
+    const int SAMPLE_BUDGET_PER_TICK = 18;
+    const int RECURSE_NODES_PER_SAMPLE = 2;
 
     // Metadata-fetch timeout housekeeping. Most DHT-sniffed infohashes have no
     // reachable peer (get_peers = someone *asking*, not *having*), so they hold a
@@ -78,6 +78,9 @@ namespace
     // discovery firehose never grows memory; the store re-supplies as slots free.
     const int SCHEDULE_INTERVAL_MS = 3000;
     const int MAX_PENDING = 2000;
+    const int MAX_CONCURRENT_METADATA = 40;
+    const int SIGHTING_FLUSH_INTERVAL_MS = 1000;
+    const int MAX_SIGHTING_BUFFER = 500;
 
     // Retention: keep the index useful instead of letting metadata-less sightings
     // accumulate forever. A metadata-less infohash that exhausted its fetch
@@ -120,15 +123,18 @@ DHTHarvester::DHTHarvester(Session *session, lt::session *nativeSession, const P
     , m_timeoutTimer {new QTimer(this)}
     , m_scheduleTimer {new QTimer(this)}
     , m_pruneTimer {new QTimer(this)}
+    , m_sightingFlushTimer {new QTimer(this)}
 {
     m_sampleTimer->setInterval(SAMPLE_INTERVAL_MS);
     m_timeoutTimer->setInterval(TIMEOUT_SWEEP_MS);
     m_scheduleTimer->setInterval(SCHEDULE_INTERVAL_MS);
     m_pruneTimer->setInterval(PRUNE_INTERVAL_MS);
+    m_sightingFlushTimer->setInterval(SIGHTING_FLUSH_INTERVAL_MS);
     connect(m_sampleTimer, &QTimer::timeout, this, &DHTHarvester::onSampleTimer);
     connect(m_timeoutTimer, &QTimer::timeout, this, &DHTHarvester::onTimeoutTimer);
     connect(m_scheduleTimer, &QTimer::timeout, this, &DHTHarvester::onScheduleTimer);
     connect(m_pruneTimer, &QTimer::timeout, this, &DHTHarvester::onPruneTimer);
+    connect(m_sightingFlushTimer, &QTimer::timeout, this, &DHTHarvester::flushSightings);
     connect(m_session, &Session::metadataDownloaded, this, &DHTHarvester::onMetadataDownloaded);
 }
 
@@ -161,7 +167,7 @@ void DHTHarvester::setActiveCrawlEnabled(const bool enabled)
 
 void DHTHarvester::setMaxConcurrentMetadata(const int max)
 {
-    m_maxConcurrent = std::max(1, max);
+    m_maxConcurrent = std::clamp(max, 1, MAX_CONCURRENT_METADATA);
 }
 
 HarvestStore *DHTHarvester::store() const
@@ -201,6 +207,7 @@ void DHTHarvester::start()
     m_timeoutTimer->start();
     m_scheduleTimer->start();
     m_pruneTimer->start();
+    m_sightingFlushTimer->start();
     m_running = true;
 
     LogMsg(tr("DHT harvester started (egress bound to interface \"%1\").").arg(m_session->networkInterfaceName()), Log::INFO);
@@ -212,6 +219,9 @@ void DHTHarvester::stop()
     m_timeoutTimer->stop();
     m_scheduleTimer->stop();
     m_pruneTimer->stop();
+    m_sightingFlushTimer->stop();
+
+    flushSightings();
 
     for (auto it = m_inFlight.cbegin(); it != m_inFlight.cend(); ++it)
         m_session->cancelDownloadMetadata(TorrentID::fromString(it.key()));
@@ -219,6 +229,7 @@ void DHTHarvester::stop()
     m_pending.clear();
     m_queued.clear();
     m_done.clear();
+    m_sightingBuffer.clear();
 
     if (m_storeThread)
     {
@@ -525,7 +536,19 @@ void DHTHarvester::postSighting(const QString &infoHashV1, const QString &source
     sighting.source = source;
     sighting.peerIP = ip;
     sighting.peerPort = port;
-    QMetaObject::invokeMethod(m_store, [store = m_store, sighting] { store->recordSighting(sighting); }, Qt::QueuedConnection);
+    m_sightingBuffer.append(sighting);
+    if (m_sightingBuffer.size() >= MAX_SIGHTING_BUFFER)
+        flushSightings();
+}
+
+void DHTHarvester::flushSightings()
+{
+    if (!m_store || m_sightingBuffer.isEmpty())
+        return;
+
+    const QList<HarvestSighting> sightings = m_sightingBuffer;
+    m_sightingBuffer.clear();
+    QMetaObject::invokeMethod(m_store, [store = m_store, sightings] { store->recordSightings(sightings); }, Qt::QueuedConnection);
 }
 
 void DHTHarvester::onMetadataDownloaded(const TorrentInfo &info)
