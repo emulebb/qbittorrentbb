@@ -595,7 +595,7 @@ namespace BitTorrent
         void populateExcludedFileNamesRegExpList();
         void prepareStartup();
         void handleLoadedResumeData(ResumeSessionContext *context);
-        void processNextResumeData(ResumeSessionContext *context);
+        bool processNextResumeData(ResumeSessionContext *context);
         void endStartup(ResumeSessionContext *context);
 
         LoadTorrentParams initLoadTorrentParams(const AddTorrentParams &addTorrentParams);
