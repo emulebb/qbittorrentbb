@@ -1659,9 +1659,19 @@ void SessionImpl::prepareStartup()
         handleLoadedResumeData(context);
     });
 
-    connect(context->startupStorage, &ResumeDataStorage::loadFinished, context, [context]()
+    connect(context->startupStorage, &ResumeDataStorage::loadFinished, context, [this, context]()
     {
         context->isLoadFinished = true;
+        if (!context->isLoadedResumeDataHandlingEnqueued)
+        {
+            QPointer<ResumeSessionContext> contextGuard = context;
+            QMetaObject::invokeMethod(this, [this, contextGuard]
+            {
+                if (contextGuard)
+                    handleLoadedResumeData(contextGuard);
+            }, Qt::QueuedConnection);
+            context->isLoadedResumeDataHandlingEnqueued = true;
+        }
     });
 
     connect(this, &SessionImpl::addTorrentAlertsReceived, context, [this, context](const qsizetype alertsCount)
@@ -1670,7 +1680,12 @@ void SessionImpl::prepareStartup()
         context->finishedResumeDataCount += alertsCount;
         if (!context->isLoadedResumeDataHandlingEnqueued)
         {
-            QMetaObject::invokeMethod(this, [this, context] { handleLoadedResumeData(context); }, Qt::QueuedConnection);
+            QPointer<ResumeSessionContext> contextGuard = context;
+            QMetaObject::invokeMethod(this, [this, contextGuard]
+            {
+                if (contextGuard)
+                    handleLoadedResumeData(contextGuard);
+            }, Qt::QueuedConnection);
             context->isLoadedResumeDataHandlingEnqueued = true;
         }
 
@@ -1688,6 +1703,9 @@ void SessionImpl::prepareStartup()
 
 void SessionImpl::handleLoadedResumeData(ResumeSessionContext *context)
 {
+    if (!context)
+        return;
+
     context->isLoadedResumeDataHandlingEnqueued = false;
 
     int count = context->processingResumeDataCount;
@@ -1706,7 +1724,12 @@ void SessionImpl::handleLoadedResumeData(ResumeSessionContext *context)
                 }
                 else if (!context->isLoadedResumeDataHandlingEnqueued)
                 {
-                    QMetaObject::invokeMethod(this, [this, context]() { handleLoadedResumeData(context); }, Qt::QueuedConnection);
+                    QPointer<ResumeSessionContext> contextGuard = context;
+                    QTimer::singleShot(25, this, [this, contextGuard]
+                    {
+                        if (contextGuard)
+                            handleLoadedResumeData(contextGuard);
+                    });
                     context->isLoadedResumeDataHandlingEnqueued = true;
                 }
             }
@@ -1714,33 +1737,43 @@ void SessionImpl::handleLoadedResumeData(ResumeSessionContext *context)
             break;
         }
 
-        processNextResumeData(context);
+        if (!processNextResumeData(context))
+            break;
         ++count;
     }
 
     context->finishedResumeDataCount += (count - context->processingResumeDataCount);
 }
 
-void SessionImpl::processNextResumeData(ResumeSessionContext *context)
+bool SessionImpl::processNextResumeData(ResumeSessionContext *context)
 {
+    if (!context || context->loadedResumeData.isEmpty())
+        return false;
+
     auto [torrentID, loadResumeDataResult] = context->loadedResumeData.takeFirst();
 
 #ifdef QBT_USES_LIBTORRENT2
     if (context->skippedIDs.contains(torrentID))
-        return;
+        return true;
 #endif
 
     if (!loadResumeDataResult)
     {
         LogMsg(tr("Failed to resume torrent. Torrent: \"%1\". Reason: \"%2\"")
                .arg(torrentID.toString(), loadResumeDataResult.error()), Log::CRITICAL);
-        return;
+        return true;
     }
 
     LoadTorrentParams resumeData = std::move(*loadResumeDataResult);
     bool needStore = false;
 
     const InfoHash infoHash = getInfoHash(resumeData.ltAddTorrentParams);
+    if (!infoHash.isValid())
+    {
+        LogMsg(tr("Failed to resume torrent: missing or invalid info hash is detected. Torrent: \"%1\"")
+               .arg(torrentID.toString()), Log::WARNING);
+        return true;
+    }
 #ifdef QBT_USES_LIBTORRENT2
     const bool isHybrid = infoHash.isHybrid();
     const auto torrentIDv2 = TorrentID::fromInfoHash(infoHash);
@@ -1785,14 +1818,14 @@ void SessionImpl::processNextResumeData(ResumeSessionContext *context)
     {
         LogMsg(tr("Failed to resume torrent: inconsistent torrent ID is detected. Torrent: \"%1\"")
                .arg(torrentID.toString()), Log::WARNING);
-        return;
+        return true;
     }
 #else
     if (torrentID != TorrentID::fromInfoHash(infoHash))
     {
         LogMsg(tr("Failed to resume torrent: inconsistent torrent ID is detected. Torrent: \"%1\"")
                .arg(torrentID.toString()), Log::WARNING);
-        return;
+        return true;
     }
 #endif
 
@@ -1895,6 +1928,7 @@ void SessionImpl::processNextResumeData(ResumeSessionContext *context)
     });
 
     ++context->processingResumeDataCount;
+    return true;
 }
 
 void SessionImpl::endStartup(ResumeSessionContext *context)
