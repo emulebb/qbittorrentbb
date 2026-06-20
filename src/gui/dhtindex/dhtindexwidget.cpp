@@ -28,6 +28,7 @@
 
 #include "dhtindexwidget.h"
 
+#include <algorithm>
 #include <optional>
 
 #include <QApplication>
@@ -40,6 +41,8 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QPushButton>
+#include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QTableWidget>
 #include <QTimer>
@@ -62,9 +65,11 @@ namespace
     enum Column
     {
         COL_NAME = 0,
+        COL_CONTENT,
         COL_SIZE,
         COL_FILES,
         COL_SIGHTINGS,
+        COL_FIRSTSEEN,
         COL_LASTSEEN,
         COL_COUNT
     };
@@ -112,6 +117,57 @@ namespace
             return std::nullopt;
         return descr.value();
     }
+
+    QString displayContentType(const QString &contentType)
+    {
+        if (contentType == u"disk-image"_s)
+            return DHTIndexWidget::tr("Disk image");
+        if (contentType == u"mixed"_s)
+            return DHTIndexWidget::tr("Mixed");
+        if (contentType == u"video"_s)
+            return DHTIndexWidget::tr("Video");
+        if (contentType == u"audio"_s)
+            return DHTIndexWidget::tr("Audio");
+        if (contentType == u"archive"_s)
+            return DHTIndexWidget::tr("Archive");
+        if (contentType == u"document"_s)
+            return DHTIndexWidget::tr("Document");
+        if (contentType == u"image"_s)
+            return DHTIndexWidget::tr("Image");
+        if (contentType == u"software"_s)
+            return DHTIndexWidget::tr("Software");
+        if (contentType == u"subtitle"_s)
+            return DHTIndexWidget::tr("Subtitle");
+        return DHTIndexWidget::tr("Other");
+    }
+
+    QString rowsSignature(const QList<BitTorrent::HarvestSearchResult> &results)
+    {
+        QString signature;
+        signature.reserve(results.size() * 96);
+        for (const BitTorrent::HarvestSearchResult &result : results)
+        {
+            signature += result.infoHashV1;
+            signature += u'|';
+            signature += result.name;
+            signature += u'|';
+            signature += result.contentType;
+            signature += u'|';
+            signature += QString::number(result.size);
+            signature += u'|';
+            signature += QString::number(result.fileCount);
+            signature += u'|';
+            signature += QString::number(result.sightings);
+            signature += u'|';
+            signature += QString::number(result.peers);
+            signature += u'|';
+            signature += QString::number(result.firstSeenMs);
+            signature += u'|';
+            signature += QString::number(result.lastSeenMs);
+            signature += u'\n';
+        }
+        return signature;
+    }
 }
 
 DHTIndexWidget::DHTIndexWidget(QWidget *parent)
@@ -143,7 +199,8 @@ DHTIndexWidget::DHTIndexWidget(QWidget *parent)
 
     m_table = new QTableWidget(this);
     m_table->setColumnCount(COL_COUNT);
-    m_table->setHorizontalHeaderLabels({tr("Name"), tr("Size"), tr("Files"), tr("Sightings"), tr("Last seen")});
+    m_table->setHorizontalHeaderLabels({tr("Name"), tr("Content"), tr("Size"), tr("Files"), tr("Sightings"),
+            tr("First seen"), tr("Last seen")});
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -156,9 +213,11 @@ DHTIndexWidget::DHTIndexWidget(QWidget *parent)
     header->setSectionsMovable(true);
     header->setStretchLastSection(false);
     m_table->setColumnWidth(COL_NAME, 380);
+    m_table->setColumnWidth(COL_CONTENT, 90);
     m_table->setColumnWidth(COL_SIZE, 90);
     m_table->setColumnWidth(COL_FILES, 60);
     m_table->setColumnWidth(COL_SIGHTINGS, 80);
+    m_table->setColumnWidth(COL_FIRSTSEEN, 130);
     m_table->setColumnWidth(COL_LASTSEEN, 130);
     connect(m_table, &QWidget::customContextMenuRequested, this, &DHTIndexWidget::showContextMenu);
     connect(m_table, &QTableWidget::itemSelectionChanged, this, &DHTIndexWidget::onSelectionChanged);
@@ -220,11 +279,20 @@ void DHTIndexWidget::search()
 
 void DHTIndexWidget::setRows(const QList<BitTorrent::HarvestSearchResult> &results)
 {
+    const QString newSignature = rowsSignature(results);
+    if (newSignature == m_rowsSignature)
+        return;
+    m_rowsSignature = newSignature;
+
     // Preserve the current selection across refreshes of the live feed.
     const QString selected = selectedInfoHash();
+    const int scrollValue = m_table->verticalScrollBar()->value();
+    const int sortColumn = m_table->horizontalHeader()->sortIndicatorSection();
+    const Qt::SortOrder sortOrder = m_table->horizontalHeader()->sortIndicatorOrder();
 
     // Repopulate with sorting off, then restore it so the user's chosen sort
     // column/order is reapplied to the new data.
+    const QSignalBlocker blocker {m_table};
     m_table->setSortingEnabled(false);
     m_table->setRowCount(results.size());
     int row = 0;
@@ -233,15 +301,22 @@ void DHTIndexWidget::setRows(const QList<BitTorrent::HarvestSearchResult> &resul
         auto *nameItem = new QTableWidgetItem(result.name);
         nameItem->setData(Qt::UserRole, result.infoHashV1);
         m_table->setItem(row, COL_NAME, nameItem);
+        auto *contentItem = new QTableWidgetItem(displayContentType(result.contentType));
+        contentItem->setData(Qt::UserRole, result.contentType);
+        m_table->setItem(row, COL_CONTENT, contentItem);
         m_table->setItem(row, COL_SIZE, new NumericItem(result.size, Utils::Misc::friendlyUnit(result.size)));
         m_table->setItem(row, COL_FILES, new NumericItem(result.fileCount, QString::number(result.fileCount)));
         m_table->setItem(row, COL_SIGHTINGS, new NumericItem(result.sightings, QString::number(result.sightings)));
+        m_table->setItem(row, COL_FIRSTSEEN, new NumericItem(result.firstSeenMs
+                , QDateTime::fromMSecsSinceEpoch(result.firstSeenMs).toString(u"yyyy-MM-dd hh:mm"_s)));
         m_table->setItem(row, COL_LASTSEEN, new NumericItem(result.lastSeenMs
                 , QDateTime::fromMSecsSinceEpoch(result.lastSeenMs).toString(u"yyyy-MM-dd hh:mm"_s)));
         ++row;
     }
     m_table->setSortingEnabled(true);
+    m_table->sortByColumn(sortColumn, sortOrder);
 
+    bool restoredSelection = false;
     if (!selected.isEmpty())
     {
         for (int r = 0; r < m_table->rowCount(); ++r)
@@ -250,10 +325,15 @@ void DHTIndexWidget::setRows(const QList<BitTorrent::HarvestSearchResult> &resul
             if (item && (item->data(Qt::UserRole).toString() == selected))
             {
                 m_table->selectRow(r);
+                restoredSelection = true;
                 break;
             }
         }
     }
+    m_table->verticalScrollBar()->setValue(std::min(scrollValue, m_table->verticalScrollBar()->maximum()));
+
+    if (!restoredSelection && !selected.isEmpty())
+        onSelectionChanged();
 }
 
 void DHTIndexWidget::onSelectionChanged()
