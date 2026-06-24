@@ -46,7 +46,7 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace
 {
-    const int DB_VERSION = 5;
+    const int DB_VERSION = 6;
 
     // Fetch-backoff policy for metadata acquisition.
     const int MAX_FETCH_ATTEMPTS = 5;
@@ -94,6 +94,34 @@ namespace
         for (const QString &token : tokens)
             terms.append(token + u'*');
         return terms.join(u' ');
+    }
+
+    // Shared SELECT column list (and matching reader) for every windowed index
+    // read, so search/recent and their per-type variants stay in lockstep. The
+    // torrents table must be aliased "t".
+    const QString SELECT_RESULT_COLS =
+            u"t.infohash_v1, t.name, t.content_type, t.size_bytes, t.file_count,"
+            u" t.first_seen_ms, t.last_seen_ms, t.metadata_fetched, t.swarm_peers,"
+            u" t.tracker_seeds, t.tracker_leechers, t.tracker_scrape_ms,"
+            u" (SELECT count(*) FROM infohash_sightings s WHERE s.infohash_v1 = t.infohash_v1)"_s;
+
+    BitTorrent::HarvestSearchResult readResultRow(const QSqlQuery &query)
+    {
+        BitTorrent::HarvestSearchResult row;
+        row.infoHashV1 = query.value(0).toString();
+        row.name = query.value(1).toString();
+        row.contentType = query.value(2).toString();
+        row.size = query.value(3).toLongLong();
+        row.fileCount = query.value(4).toInt();
+        row.firstSeenMs = query.value(5).toLongLong();
+        row.lastSeenMs = query.value(6).toLongLong();
+        row.metadataFetched = (query.value(7).toInt() != 0);
+        row.peers = query.value(8).toInt();
+        row.trackerSeeds = query.value(9).toInt();
+        row.trackerLeechers = query.value(10).toInt();
+        row.trackerScrapeMs = query.value(11).toLongLong();
+        row.sightings = query.value(12).toInt();
+        return row;
     }
 
     QList<BitTorrent::HarvestedFile> filesForTorrent(QSqlDatabase &db, const qint64 torrentId)
@@ -174,7 +202,16 @@ void HarvestStore::ensureSchema()
     if (hasMeta && (version == DB_VERSION))
         return;
 
-    if (hasMeta && (version == 3))
+    // Fresh database: build the current schema directly.
+    if (!hasMeta)
+    {
+        createSchema();
+        return;
+    }
+
+    // Known older schema: migrate forward one step at a time, preserving the index.
+    // Unknown/newer versions fall through to a reset below.
+    if ((version >= 3) && (version < DB_VERSION))
     {
         LogMsg(QObject::tr("Migrating DHT harvest index from schema %1 to %2.").arg(version).arg(DB_VERSION), Log::INFO);
         if (!db.transaction())
@@ -182,25 +219,55 @@ void HarvestStore::ensureSchema()
 
         try
         {
-            if (!query.exec(u"ALTER TABLE torrents ADD COLUMN content_type TEXT NOT NULL DEFAULT 'other';"_s))
-                throw RuntimeError(query.lastError().text());
-
-            QSqlQuery torrents {db};
-            if (!torrents.exec(u"SELECT id, size_bytes FROM torrents WHERE metadata_fetched = 1;"_s))
-                throw RuntimeError(torrents.lastError().text());
-
-            QList<QPair<qint64, qint64>> torrentRows;
-            while (torrents.next())
-                torrentRows.append({torrents.value(0).toLongLong(), torrents.value(1).toLongLong()});
-
-            for (const auto &[torrentId, totalSize] : torrentRows)
+            // 3 -> 4: content_type column + classify backfill.
+            if (version < 4)
             {
-                QSqlQuery update {db};
-                update.prepare(u"UPDATE torrents SET content_type = :content WHERE id = :id;"_s);
-                update.bindValue(u":content"_s, BitTorrent::classifyHarvestedContent(filesForTorrent(db, torrentId), totalSize));
-                update.bindValue(u":id"_s, torrentId);
-                if (!update.exec())
-                    throw RuntimeError(update.lastError().text());
+                if (!query.exec(u"ALTER TABLE torrents ADD COLUMN content_type TEXT NOT NULL DEFAULT 'other';"_s))
+                    throw RuntimeError(query.lastError().text());
+
+                QSqlQuery torrents {db};
+                if (!torrents.exec(u"SELECT id, size_bytes FROM torrents WHERE metadata_fetched = 1;"_s))
+                    throw RuntimeError(torrents.lastError().text());
+
+                QList<QPair<qint64, qint64>> torrentRows;
+                while (torrents.next())
+                    torrentRows.append({torrents.value(0).toLongLong(), torrents.value(1).toLongLong()});
+
+                for (const auto &[torrentId, totalSize] : torrentRows)
+                {
+                    QSqlQuery update {db};
+                    update.prepare(u"UPDATE torrents SET content_type = :content WHERE id = :id;"_s);
+                    update.bindValue(u":content"_s, BitTorrent::classifyHarvestedContent(filesForTorrent(db, torrentId), totalSize));
+                    update.bindValue(u":id"_s, torrentId);
+                    if (!update.exec())
+                        throw RuntimeError(update.lastError().text());
+                }
+            }
+
+            // 4 -> 5: announce_count column + backfill from the sighting history so the
+            // fetch scheduler immediately favours infohashes a peer was seen holding.
+            if (version < 5)
+            {
+                if (!query.exec(u"ALTER TABLE torrents ADD COLUMN announce_count INTEGER NOT NULL DEFAULT 0;"_s))
+                    throw RuntimeError(query.lastError().text());
+                if (!query.exec(u"UPDATE torrents SET announce_count ="
+                                u" (SELECT COUNT(*) FROM infohash_sightings s"
+                                u"  WHERE s.infohash_v1 = torrents.infohash_v1 AND s.source = 'announce');"_s))
+                    throw RuntimeError(query.lastError().text());
+            }
+
+            // 5 -> 6: tracker-scrape columns + content_type index (grouped tree).
+            if (version < 6)
+            {
+                for (const QString &stmt : {
+                        u"ALTER TABLE torrents ADD COLUMN tracker_seeds INTEGER NOT NULL DEFAULT -1;"_s,
+                        u"ALTER TABLE torrents ADD COLUMN tracker_leechers INTEGER NOT NULL DEFAULT -1;"_s,
+                        u"ALTER TABLE torrents ADD COLUMN tracker_scrape_ms INTEGER NOT NULL DEFAULT 0;"_s,
+                        u"CREATE INDEX IF NOT EXISTS torrents_content_type_idx ON torrents(content_type, metadata_fetched);"_s})
+                {
+                    if (!query.exec(stmt))
+                        throw RuntimeError(query.lastError().text());
+                }
             }
 
             query.prepare(u"UPDATE harvest_meta SET value = :version WHERE name = 'version';"_s);
@@ -219,43 +286,8 @@ void HarvestStore::ensureSchema()
         return;
     }
 
-    if (hasMeta && (version == 4))
-    {
-        LogMsg(QObject::tr("Migrating DHT harvest index from schema %1 to %2.").arg(version).arg(DB_VERSION), Log::INFO);
-        if (!db.transaction())
-            throw RuntimeError(db.lastError().text());
-
-        try
-        {
-            if (!query.exec(u"ALTER TABLE torrents ADD COLUMN announce_count INTEGER NOT NULL DEFAULT 0;"_s))
-                throw RuntimeError(query.lastError().text());
-
-            // Backfill the announce count from the existing sighting history so the
-            // fetch scheduler immediately favours infohashes a peer was seen holding.
-            if (!query.exec(u"UPDATE torrents SET announce_count ="
-                            u" (SELECT COUNT(*) FROM infohash_sightings s"
-                            u"  WHERE s.infohash_v1 = torrents.infohash_v1 AND s.source = 'announce');"_s))
-                throw RuntimeError(query.lastError().text());
-
-            query.prepare(u"UPDATE harvest_meta SET value = :version WHERE name = 'version';"_s);
-            query.bindValue(u":version"_s, DB_VERSION);
-            if (!query.exec())
-                throw RuntimeError(query.lastError().text());
-
-            if (!db.commit())
-                throw RuntimeError(db.lastError().text());
-        }
-        catch (const RuntimeError &)
-        {
-            db.rollback();
-            throw;
-        }
-        return;
-    }
-
-    // Fresh DB or version mismatch: reset our tables and (re)create.
-    if (hasMeta)
-        LogMsg(QObject::tr("Resetting DHT harvest index (schema changed)."), Log::INFO);
+    // Unknown version: reset our tables and (re)create.
+    LogMsg(QObject::tr("Resetting DHT harvest index (schema changed)."), Log::INFO);
 
     for (const QString &stmt : {
             u"DROP TRIGGER IF EXISTS torrents_fts_ai;"_s,
@@ -309,9 +341,14 @@ void HarvestStore::createSchema()
              u"announce_count INTEGER NOT NULL DEFAULT 0,"
              u"swarm_peers INTEGER NOT NULL DEFAULT 0,"
              u"swarm_seen_ms INTEGER NOT NULL DEFAULT 0,"
+             u"tracker_seeds INTEGER NOT NULL DEFAULT -1,"
+             u"tracker_leechers INTEGER NOT NULL DEFAULT -1,"
+             u"tracker_scrape_ms INTEGER NOT NULL DEFAULT 0,"
              u"first_seen_ms INTEGER NOT NULL,"
              u"last_seen_ms INTEGER NOT NULL,"
              u"updated_at_ms INTEGER NOT NULL);"_s);
+        // Speeds up the grouped index tree's per-content-type counts and windows.
+        exec(u"CREATE INDEX torrents_content_type_idx ON torrents(content_type, metadata_fetched);"_s);
 
         exec(u"CREATE TABLE torrent_files ("
              u"id INTEGER PRIMARY KEY,"
@@ -527,6 +564,25 @@ void HarvestStore::updateSwarm(const QString &infoHashV1, int peers)
     query.exec();
 }
 
+void HarvestStore::updateTrackerScrape(const QString &infoHashV1, int seeds, int leechers)
+{
+    if (infoHashV1.isEmpty() || (seeds < 0) || (leechers < 0))
+        return;
+
+    const qint64 now = nowMs();
+    auto db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery query {db};
+    // Like updateSwarm: only annotate an already-known torrent, never create a row
+    // from a scrape alone. The scrape timestamp gates the GUI's re-scrape freshness.
+    query.prepare(u"UPDATE torrents SET tracker_seeds = :seeds, tracker_leechers = :leechers,"
+                  u" tracker_scrape_ms = :now, updated_at_ms = :now WHERE infohash_v1 = :ih;"_s);
+    query.bindValue(u":seeds"_s, seeds);
+    query.bindValue(u":leechers"_s, leechers);
+    query.bindValue(u":now"_s, now);
+    query.bindValue(u":ih"_s, infoHashV1);
+    query.exec();
+}
+
 bool HarvestStore::needsMetadata(const QString &infoHashV1) const
 {
     if (infoHashV1.isEmpty())
@@ -575,10 +631,8 @@ HarvestSearchPage HarvestStore::search(const QString &queryText, int limit, int 
         page.total = countQuery.value(0).toLongLong();
 
     QSqlQuery query {db};
-    query.prepare(u"SELECT t.infohash_v1, t.name, t.content_type, t.size_bytes, t.file_count,"
-                  u" t.first_seen_ms, t.last_seen_ms, t.metadata_fetched, t.swarm_peers,"
-                  u" (SELECT count(*) FROM infohash_sightings s WHERE s.infohash_v1 = t.infohash_v1)"
-                  u" FROM torrent_name_fts f"
+    query.prepare(u"SELECT "_s + SELECT_RESULT_COLS
+                  + u" FROM torrent_name_fts f"
                   u" JOIN torrents t ON t.id = f.rowid"
                   u" WHERE torrent_name_fts MATCH :match"
                   u" ORDER BY bm25(torrent_name_fts), t.availability_score DESC, t.last_seen_ms DESC"
@@ -593,20 +647,7 @@ HarvestSearchPage HarvestStore::search(const QString &queryText, int limit, int 
     }
 
     while (query.next())
-    {
-        HarvestSearchResult row;
-        row.infoHashV1 = query.value(0).toString();
-        row.name = query.value(1).toString();
-        row.contentType = query.value(2).toString();
-        row.size = query.value(3).toLongLong();
-        row.fileCount = query.value(4).toInt();
-        row.firstSeenMs = query.value(5).toLongLong();
-        row.lastSeenMs = query.value(6).toLongLong();
-        row.metadataFetched = (query.value(7).toInt() != 0);
-        row.peers = query.value(8).toInt();
-        row.sightings = query.value(9).toInt();
-        page.items.append(row);
-    }
+        page.items.append(readResultRow(query));
 
     return page;
 }
@@ -624,10 +665,8 @@ HarvestSearchPage HarvestStore::recent(int limit, int offset) const
         page.total = countQuery.value(0).toLongLong();
 
     QSqlQuery query {db};
-    query.prepare(u"SELECT t.infohash_v1, t.name, t.content_type, t.size_bytes, t.file_count,"
-                  u" t.first_seen_ms, t.last_seen_ms, t.metadata_fetched, t.swarm_peers,"
-                  u" (SELECT count(*) FROM infohash_sightings s WHERE s.infohash_v1 = t.infohash_v1)"
-                  u" FROM torrents t"
+    query.prepare(u"SELECT "_s + SELECT_RESULT_COLS
+                  + u" FROM torrents t"
                   u" WHERE t.metadata_fetched = 1"
                   u" ORDER BY t.first_seen_ms DESC"
                   u" LIMIT :limit OFFSET :offset;"_s);
@@ -637,20 +676,114 @@ HarvestSearchPage HarvestStore::recent(int limit, int offset) const
         return page;
 
     while (query.next())
+        page.items.append(readResultRow(query));
+
+    return page;
+}
+
+QList<HarvestTypeCount> HarvestStore::typeCounts(const QString &queryText) const
+{
+    QList<HarvestTypeCount> out;
+    auto db = QSqlDatabase::database(m_connectionName);
+    QSqlQuery query {db};
+
+    const QString match = toFtsMatch(normalizeText(queryText));
+    if (match.isEmpty())
     {
-        HarvestSearchResult row;
-        row.infoHashV1 = query.value(0).toString();
-        row.name = query.value(1).toString();
-        row.contentType = query.value(2).toString();
-        row.size = query.value(3).toLongLong();
-        row.fileCount = query.value(4).toInt();
-        row.firstSeenMs = query.value(5).toLongLong();
-        row.lastSeenMs = query.value(6).toLongLong();
-        row.metadataFetched = (query.value(7).toInt() != 0);
-        row.peers = query.value(8).toInt();
-        row.sightings = query.value(9).toInt();
-        page.items.append(row);
+        // No query: bucket every metadata-complete torrent by content type.
+        if (!query.exec(u"SELECT content_type, count(*) FROM torrents"
+                        u" WHERE metadata_fetched = 1 GROUP BY content_type"
+                        u" ORDER BY count(*) DESC;"_s))
+            return out;
     }
+    else
+    {
+        query.prepare(u"SELECT t.content_type, count(*)"
+                      u" FROM torrent_name_fts f JOIN torrents t ON t.id = f.rowid"
+                      u" WHERE torrent_name_fts MATCH :match"
+                      u" GROUP BY t.content_type ORDER BY count(*) DESC;"_s);
+        query.bindValue(u":match"_s, match);
+        if (!query.exec())
+            return out;
+    }
+
+    while (query.next())
+    {
+        HarvestTypeCount bucket;
+        bucket.contentType = query.value(0).toString();
+        bucket.count = query.value(1).toLongLong();
+        out.append(bucket);
+    }
+    return out;
+}
+
+HarvestSearchPage HarvestStore::searchByType(const QString &queryText, const QString &contentType, int limit, int offset) const
+{
+    HarvestSearchPage page;
+
+    const QString match = toFtsMatch(normalizeText(queryText));
+    if (match.isEmpty())
+        return page;
+
+    auto db = QSqlDatabase::database(m_connectionName);
+
+    QSqlQuery countQuery {db};
+    countQuery.prepare(u"SELECT count(*) FROM torrent_name_fts f JOIN torrents t ON t.id = f.rowid"
+                       u" WHERE torrent_name_fts MATCH :match AND t.content_type = :type;"_s);
+    countQuery.bindValue(u":match"_s, match);
+    countQuery.bindValue(u":type"_s, contentType);
+    if (countQuery.exec() && countQuery.next())
+        page.total = countQuery.value(0).toLongLong();
+
+    QSqlQuery query {db};
+    query.prepare(u"SELECT "_s + SELECT_RESULT_COLS
+                  + u" FROM torrent_name_fts f"
+                  u" JOIN torrents t ON t.id = f.rowid"
+                  u" WHERE torrent_name_fts MATCH :match AND t.content_type = :type"
+                  u" ORDER BY bm25(torrent_name_fts), t.availability_score DESC, t.last_seen_ms DESC"
+                  u" LIMIT :limit OFFSET :offset;"_s);
+    query.bindValue(u":match"_s, match);
+    query.bindValue(u":type"_s, contentType);
+    query.bindValue(u":limit"_s, limit);
+    query.bindValue(u":offset"_s, offset);
+    if (!query.exec())
+    {
+        LogMsg(QObject::tr("DHT harvest: search failed. %1").arg(query.lastError().text()), Log::WARNING);
+        return page;
+    }
+
+    while (query.next())
+        page.items.append(readResultRow(query));
+
+    return page;
+}
+
+HarvestSearchPage HarvestStore::recentByType(const QString &contentType, int limit, int offset) const
+{
+    HarvestSearchPage page;
+
+    auto db = QSqlDatabase::database(m_connectionName);
+
+    QSqlQuery countQuery {db};
+    countQuery.prepare(u"SELECT count(*) FROM torrents WHERE metadata_fetched = 1 AND content_type = :type;"_s);
+    countQuery.bindValue(u":type"_s, contentType);
+    if (countQuery.exec() && countQuery.next())
+        page.total = countQuery.value(0).toLongLong();
+
+    QSqlQuery query {db};
+    query.prepare(u"SELECT "_s + SELECT_RESULT_COLS
+                  + u" FROM torrents t"
+                  u" WHERE t.metadata_fetched = 1 AND t.content_type = :type"
+                  u" ORDER BY t.first_seen_ms DESC"
+                  u" LIMIT :limit OFFSET :offset;"_s);
+    query.bindValue(u":type"_s, contentType);
+    query.bindValue(u":limit"_s, limit);
+    query.bindValue(u":offset"_s, offset);
+    if (!query.exec())
+        return page;
+
+    while (query.next())
+        page.items.append(readResultRow(query));
 
     return page;
 }

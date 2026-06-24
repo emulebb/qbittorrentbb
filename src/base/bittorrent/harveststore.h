@@ -80,12 +80,22 @@ namespace BitTorrent
         int sightings = 0;
         int peers = 0;            // last observed DHT swarm size (get_peers reply)
         bool metadataFetched = false;
+        int trackerSeeds = -1;       // BEP-15 scrape seeders (-1 = never scraped)
+        int trackerLeechers = -1;    // BEP-15 scrape leechers (-1 = never scraped)
+        qint64 trackerScrapeMs = 0;  // last successful scrape time (0 = never)
     };
 
     struct HarvestSearchPage
     {
         QList<HarvestSearchResult> items;
         qint64 total = 0;  // full count across all pages, for paginated callers
+    };
+
+    // One content-type bucket and its row count, for the grouped index tree.
+    struct HarvestTypeCount
+    {
+        QString contentType;
+        qint64 count = 0;
     };
 
     struct HarvestStats
@@ -161,10 +171,18 @@ namespace BitTorrent
         void noteFetchFailure(const QString &infoHashV1);
         // Records the real DHT swarm size (peer count from a get_peers reply).
         void updateSwarm(const QString &infoHashV1, int peers);
+        // Records the seeders/leechers from a BEP-15 tracker scrape.
+        void updateTrackerScrape(const QString &infoHashV1, int seeds, int leechers);
 
         // Readers (may be invoked via BlockingQueuedConnection from the GUI).
         BitTorrent::HarvestSearchPage search(const QString &query, int limit, int offset) const;
         BitTorrent::HarvestSearchPage recent(int limit, int offset) const;
+        // Per-content-type row counts that back the grouped index tree. Empty query
+        // counts metadata-complete torrents; a query counts FTS matches.
+        QList<BitTorrent::HarvestTypeCount> typeCounts(const QString &query) const;
+        // Windowed reads scoped to a single content type (drive lazy tree children).
+        BitTorrent::HarvestSearchPage searchByType(const QString &query, const QString &contentType, int limit, int offset) const;
+        BitTorrent::HarvestSearchPage recentByType(const QString &contentType, int limit, int offset) const;
         QByteArray metadataFor(const QString &infoHashV1) const;
         BitTorrent::HarvestStats stats() const;
 
@@ -192,5 +210,6 @@ namespace BitTorrent
 Q_DECLARE_METATYPE(BitTorrent::HarvestSighting)
 Q_DECLARE_METATYPE(BitTorrent::HarvestedTorrent)
 Q_DECLARE_METATYPE(BitTorrent::HarvestSearchResult)
+Q_DECLARE_METATYPE(BitTorrent::HarvestTypeCount)
 Q_DECLARE_METATYPE(BitTorrent::HarvestStats)
 Q_DECLARE_METATYPE(BitTorrent::HarvestPruneStats)
