@@ -85,6 +85,17 @@ namespace
     const int MAX_PENDING = 2000;
     const int MAX_CONCURRENT_METADATA = 64;
 
+    // How often to emit the crawl-pipeline diagnostics summary to the log.
+    const qint64 DIAG_LOG_INTERVAL_MS = 15000;
+
+    // Probe-gate: dht_get_peers liveness probes are cheap UDP, so we keep many in
+    // flight; an infohash that returns no peers within PROBE_TIMEOUT is treated as
+    // dead and never consumes a metadata-fetch slot. The probe queue is bounded
+    // like the fetch queue (the store re-supplies candidates).
+    const int MAX_PROBING = 300;
+    const int MAX_PROBE_QUEUE = 4000;
+    const qint64 PROBE_TIMEOUT_MS = 6000;
+
     // BEP-51 sampling frontier cap. The keyspace walk discovers nodes far faster
     // than they can be sampled, so the frontier is bounded; when full, exhausted
     // nodes (sampled at least once, reporting zero infohashes) are recycled to make
@@ -120,6 +131,17 @@ namespace
     QString hexOf(const lt::sha1_hash &hash)
     {
         return SHA1Hash(hash).toString();
+    }
+
+    // Parse a 40-char hex infohash into an lt::sha1_hash (for dht_get_peers probes).
+    std::optional<lt::sha1_hash> sha1FromHex(const QString &hex)
+    {
+        const QByteArray raw = QByteArray::fromHex(hex.toLatin1());
+        if (raw.size() != 20)
+            return std::nullopt;
+        lt::sha1_hash h;
+        h.assign(raw.constData());
+        return h;
     }
 
     // Rebuild a UDP endpoint from the (ip-string, port) carried in a HarvestAlertEvent.
@@ -422,6 +444,9 @@ void DHTHarvester::stop()
     m_done.clear();
     m_sightingBuffer.clear();
     m_nodes.clear();
+    m_probeQueue.clear();
+    m_probeQueued.clear();
+    m_probing.clear();
     m_candidateRequestInFlight = false;
 
     // The store (persistent SQLite index) is intentionally NOT torn down here: it
@@ -478,13 +503,16 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
     case HarvestAlertEvent::Type::GetPeers:
         // Record the sighting; the store-driven scheduler picks it up by
         // availability/recency on the next tick (no in-memory popularity gate).
+        m_statGetPeers.fetch_add(1, std::memory_order_relaxed);
         postSighting(event.infoHashHex, u"get_peers"_s, {}, 0);
         break;
     case HarvestAlertEvent::Type::Announce:
         {
             m_statAnnounces.fetch_add(1, std::memory_order_relaxed);
             postSighting(event.infoHashHex, u"announce"_s, event.ip, event.port);
-            enqueue(event.infoHashHex, /*fromAnnounce*/ true);  // a peer HAS it -> fetch immediately
+            // A peer HAS it -> skip the liveness probe (announce is itself proof of
+            // a live peer) and enqueue the fetch directly.
+            enqueue(event.infoHashHex, /*fromAnnounce*/ true);
             // The announcing peer holds the torrent: feed it straight to the
             // in-flight metadata download instead of re-finding peers via DHT.
             // connectDHTMetadataPeer touches GUI-thread Session state, so marshal it.
@@ -530,6 +558,7 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
         break;
     case HarvestAlertEvent::Type::LiveNodes:
         {
+            m_statLiveNodesSeen.fetch_add(event.nodes.size(), std::memory_order_relaxed);
             if (!m_activeCrawl)
                 break;
             // Seed the frontier from routing-table nodes near a random target;
@@ -553,6 +582,30 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
                 const QString ih = event.infoHashHex;
                 const int peers = event.numPeers;
                 QMetaObject::invokeMethod(m_store, [store = m_store, ih, peers] { store->updateSwarm(ih, peers); }, Qt::QueuedConnection);
+            }
+
+            // Probe-gate resolution: this reply may answer a liveness probe.
+            if (const auto it = m_probing.find(event.infoHashHex); it != m_probing.end())
+            {
+                m_probing.erase(it);
+                m_probeQueued.remove(event.infoHashHex);
+                if (event.numPeers > 0)
+                {
+                    // Confirmed live (a peer announced for it): enqueue a real fetch.
+                    m_statProbeHits.fetch_add(1, std::memory_order_relaxed);
+                    enqueue(event.infoHashHex, /*fromAnnounce*/ false);
+                }
+                else
+                {
+                    // No peers: treat as dead, back off so we don't immediately re-probe.
+                    m_statProbeMisses.fetch_add(1, std::memory_order_relaxed);
+                    if (m_store)
+                    {
+                        const QString ih = event.infoHashHex;
+                        QMetaObject::invokeMethod(m_store, [store = m_store, ih] { store->noteFetchFailure(ih); }, Qt::QueuedConnection);
+                    }
+                }
+                probePump();
             }
         }
         break;
@@ -607,6 +660,8 @@ void DHTHarvester::onSampleTimer()
     m_statTrackedNodes.store(static_cast<int>(m_nodes.size()), std::memory_order_relaxed);
     m_statPending.store(static_cast<int>(m_pending.size()), std::memory_order_relaxed);
     m_statInFlight.store(static_cast<int>(m_inFlight.size()), std::memory_order_relaxed);
+
+    logDiagnostics();
 }
 
 void DHTHarvester::discoverNode(const QString &ip, const quint16 port)
@@ -627,6 +682,7 @@ void DHTHarvester::discoverNode(const QString &ip, const quint16 port)
     state.ip = ip;
     state.port = port;
     m_nodes.insert(key, state);  // lastSampledMs == 0 -> due for sampling immediately
+    m_statNodesDiscovered.fetch_add(1, std::memory_order_relaxed);
 }
 
 void DHTHarvester::drainFrontier()
@@ -695,6 +751,38 @@ void DHTHarvester::drainFrontier()
     }
 }
 
+void DHTHarvester::logDiagnostics()
+{
+    const qint64 now = nowMs();
+    if ((now - m_lastDiagLogMs) < DIAG_LOG_INTERVAL_MS)
+        return;
+    m_lastDiagLogMs = now;
+
+    // One line covering the whole pipeline so a stall is pinpointable:
+    //  - in:  DHT actually feeding us (get_peers/announce/live-nodes)?
+    //  - walk: frontier growing + samples going out + replies coming back?
+    //  - out: metadata fetches in flight / completing?
+    const QString line = u"DHT harvest diag: vpn=%1 activeCrawl=%2 | in[getpeers=%3 announce=%4 liveNodes=%5] | walk[frontier=%6 discovered=%7 samplesSent=%8 sampleReplies=%9] | probe[sent=%10 hits=%11 misses=%12 active=%13] | fetch[inflight=%14 pending=%15 ok=%16 timeout=%17]"_s
+            .arg(vpnReady() ? u"up"_s : u"DOWN"_s)
+            .arg(m_activeCrawl ? u"on"_s : u"off"_s)
+            .arg(QString::number(m_statGetPeers.load(std::memory_order_relaxed)))
+            .arg(QString::number(m_statAnnounces.load(std::memory_order_relaxed)))
+            .arg(QString::number(m_statLiveNodesSeen.load(std::memory_order_relaxed)))
+            .arg(QString::number(m_nodes.size()))
+            .arg(QString::number(m_statNodesDiscovered.load(std::memory_order_relaxed)))
+            .arg(QString::number(m_statSamplesSent.load(std::memory_order_relaxed)))
+            .arg(QString::number(m_statSampleReplies.load(std::memory_order_relaxed)))
+            .arg(QString::number(m_statProbesSent.load(std::memory_order_relaxed)))
+            .arg(QString::number(m_statProbeHits.load(std::memory_order_relaxed)))
+            .arg(QString::number(m_statProbeMisses.load(std::memory_order_relaxed)))
+            .arg(QString::number(m_probing.size()))
+            .arg(QString::number(m_inFlight.size()))
+            .arg(QString::number(m_pending.size()))
+            .arg(QString::number(m_statMetadataOk.load(std::memory_order_relaxed)))
+            .arg(QString::number(m_statMetadataTimeouts.load(std::memory_order_relaxed)));
+    LogMsg(line, Log::INFO);
+}
+
 void DHTHarvester::onTimeoutTimer()
 {
     const qint64 now = nowMs();
@@ -717,6 +805,23 @@ void DHTHarvester::onTimeoutTimer()
             QMetaObject::invokeMethod(m_store, [store = m_store, ih] { store->noteFetchFailure(ih); }, Qt::QueuedConnection);
         }
     }
+
+    // Sweep stale liveness probes: an infohash whose dht_get_peers drew no reply
+    // within PROBE_TIMEOUT is treated as dead and never gets a metadata slot.
+    QStringList deadProbes;
+    for (auto it = m_probing.cbegin(); it != m_probing.cend(); ++it)
+    {
+        if ((now - it.value()) > PROBE_TIMEOUT_MS)
+            deadProbes.append(it.key());
+    }
+    for (const QString &ih : deadProbes)
+    {
+        m_probing.remove(ih);
+        m_probeQueued.remove(ih);
+        m_statProbeMisses.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (!deadProbes.isEmpty())
+        probePump();
 
     requestPump();
 }
@@ -742,15 +847,16 @@ void DHTHarvester::onScheduleTimer()
     if (!m_running || !m_store || m_candidateRequestInFlight)
         return;
 
-    const int room = m_maxConcurrent - m_inFlight.size();
-    if ((room <= 0) || (m_pending.size() >= MAX_PENDING))
+    // Keep the probe pipeline fed (candidates are gated by a liveness probe before
+    // they ever take a metadata slot). Pull only as many as the probe pipeline can
+    // absorb. The query runs on the store thread and is delivered back
+    // asynchronously (onCandidates) -- never blocking this thread.
+    const int probeRoom = MAX_PROBING - m_probing.size() - m_probeQueue.size();
+    if (probeRoom <= 0)
         return;
-
-    // Pull a little ahead of the free slots so the pump never starves; the store
-    // returns only infohashes that still need metadata and are off backoff,
-    // most promising first. The query runs on the store thread and the result is
-    // delivered back asynchronously (onCandidates) -- never blocking this thread.
-    const int batch = qMin(room * 4, MAX_PENDING - m_pending.size());
+    const int batch = qMin(probeRoom * 2, MAX_PROBE_QUEUE - m_probeQueue.size());
+    if (batch <= 0)
+        return;
     m_candidateRequestInFlight = true;
     QMetaObject::invokeMethod(m_store, [this, store = m_store, batch]
     {
@@ -763,9 +869,45 @@ void DHTHarvester::onCandidates(const QList<QString> &candidates)
 {
     m_candidateRequestInFlight = false;
     // Store-driven candidates come from the persistent index (get_peers/sample
-    // sightings); treat them as speculative (short timeout tier).
+    // sightings) and are unproven; gate them behind a liveness probe rather than
+    // spending a metadata slot speculatively.
     for (const QString &ih : candidates)
-        enqueue(ih, /*fromAnnounce*/ false);
+        queueProbe(ih);
+    probePump();
+}
+
+void DHTHarvester::queueProbe(const QString &infoHashV1)
+{
+    if (infoHashV1.isEmpty() || m_done.contains(infoHashV1) || m_queued.contains(infoHashV1)
+            || m_probeQueued.contains(infoHashV1))
+        return;
+    if (m_probeQueue.size() >= MAX_PROBE_QUEUE)
+        return;
+    m_probeQueued.insert(infoHashV1);
+    m_probeQueue.enqueue(infoHashV1);
+}
+
+void DHTHarvester::probePump()
+{
+    while ((m_probing.size() < MAX_PROBING) && !m_probeQueue.isEmpty())
+    {
+        const QString ih = m_probeQueue.dequeue();
+        if (m_done.contains(ih) || m_inFlight.contains(ih) || m_queued.contains(ih) || m_probing.contains(ih))
+        {
+            m_probeQueued.remove(ih);
+            continue;
+        }
+        const auto target = sha1FromHex(ih);
+        if (!target)
+        {
+            m_probeQueued.remove(ih);
+            continue;
+        }
+        // Fire the liveness probe; the reply (or a timeout sweep) resolves it.
+        m_nativeSession->dht_get_peers(*target);
+        m_probing.insert(ih, nowMs());
+        m_statProbesSent.fetch_add(1, std::memory_order_relaxed);
+    }
 }
 
 void DHTHarvester::onPruneTimer()

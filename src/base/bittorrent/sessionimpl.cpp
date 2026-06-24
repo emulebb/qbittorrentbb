@@ -6208,6 +6208,15 @@ void SessionImpl::dispatchHarvesterAlert(const lt::alert *alert)
             event.type = HarvestAlertEvent::Type::GetPeersReply;
             event.infoHashHex = SHA1Hash(a->info_hash).toString();
             event.numPeers = a->num_peers();
+            // Carry the actual peer endpoints so the harvester can feed them
+            // straight into a confirmed-live metadata fetch (probe-gate).
+            const std::vector<lt::tcp::endpoint> peers = a->peers();
+            event.nodes.reserve(static_cast<qsizetype>(peers.size()));
+            for (const lt::tcp::endpoint &ep : peers)
+            {
+                if (!ep.address().is_unspecified() && (ep.port() != 0))
+                    event.nodes.append({QString::fromStdString(ep.address().to_string()), ep.port()});
+            }
         }
         break;
     case lt::peer_connect_alert::alert_type:
@@ -6732,6 +6741,22 @@ void SessionImpl::handleSessionStatsAlert(const lt::session_stats_alert *alert)
     m_status.totalWasted = stats[m_metricIndices.net.recvRedundantBytes]
             + stats[m_metricIndices.net.recvFailedBytes];
     m_status.dhtNodes = stats[m_metricIndices.dht.dhtNodes];
+    // DHT-harvest diagnostic: the routing-table node count is the upstream health
+    // signal for metadata fetching -- a near-empty table means get_peers lookups
+    // can't locate seeders. Throttled to ~15s so it pairs with the harvester diag.
+    if (isDHTHarvesterEnabled())
+    {
+        static qint64 s_lastDhtHealthMs = 0;
+        const qint64 nowMsHealth = QDateTime::currentMSecsSinceEpoch();
+        if ((nowMsHealth - s_lastDhtHealthMs) >= 15000)
+        {
+            s_lastDhtHealthMs = nowMsHealth;
+            LogMsg(tr("DHT health: routingTableNodes=%1 dhtIn=%2KiB/s dhtOut=%3KiB/s peersConnected=%4 incomingConns=%5")
+                    .arg(QString::number(m_status.dhtNodes), QString::number(m_status.dhtDownloadRate / 1024)
+                        , QString::number(m_status.dhtUploadRate / 1024), QString::number(m_status.peersCount)
+                        , (m_status.hasIncomingConnections ? u"yes"_s : u"no"_s)), Log::INFO);
+        }
+    }
     m_status.diskReadQueue = stats[m_metricIndices.peer.numPeersUpDisk];
     m_status.diskWriteQueue = stats[m_metricIndices.peer.numPeersDownDisk];
     m_status.peersCount = stats[m_metricIndices.peer.numPeersConnected];

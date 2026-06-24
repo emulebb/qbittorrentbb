@@ -167,6 +167,14 @@ namespace BitTorrent
         void start();
         void stop();
         void enqueue(const QString &infoHashV1, bool fromAnnounce);
+        // Probe-gate: most DHT-sniffed infohashes have no reachable seeder (they are
+        // queries or crawler-only), so speculatively downloading metadata for them
+        // clogs the fetch slots. Instead, fire a cheap dht_get_peers probe first and
+        // only fetch infohashes that come back with real announced peers -- feeding
+        // those peers straight into the download. (Announce-sourced infohashes already
+        // have a live peer and skip the probe.)
+        void queueProbe(const QString &infoHashV1);
+        void probePump();         // issue get_peers probes from the probe queue
         void pump();
         void requestPump();       // coalesce pump() to at most once per event-loop turn
         void postSighting(const QString &infoHashV1, const QString &source, const QString &ip, int port);
@@ -177,6 +185,9 @@ namespace BitTorrent
         // Issue up to m_sampleBudgetPerTick BEP-51 sample_infohashes requests to the
         // most promising frontier nodes that are off their per-node interval.
         void drainFrontier();
+        // Emit a one-line crawl-pipeline summary to the log at a throttled cadence,
+        // so a stalled stage (no DHT alerts vs no sampling vs no fetching) is visible.
+        void logDiagnostics();
 
         Session *m_session = nullptr;
         lt::session *m_nativeSession = nullptr;
@@ -221,6 +232,13 @@ namespace BitTorrent
         QQueue<PendingFetch> m_pending;
         QSet<QString> m_queued;             // in m_pending or m_inFlight (dedupe)
         QHash<QString, qint64> m_inFlight;  // infoHashV1 -> fetch deadline (ms, source-tiered)
+
+        // Probe-gate state: infohashes awaiting a dht_get_peers liveness probe, the
+        // probes currently outstanding (ih -> sent ms, for timeout), and the live
+        // peers a confirmed infohash should be fed when its metadata fetch starts.
+        QQueue<QString> m_probeQueue;
+        QSet<QString> m_probeQueued;        // in m_probeQueue or m_probing (dedupe)
+        QHash<QString, qint64> m_probing;   // infoHashV1 -> probe sent (ms)
         QSet<QString> m_done;               // fetched this session
         QList<HarvestSighting> m_sightingBuffer;
 
@@ -256,5 +274,16 @@ namespace BitTorrent
         std::atomic<int> m_statTrackedNodes = 0;
         std::atomic<int> m_statPending = 0;
         std::atomic<int> m_statInFlight = 0;
+        // Inbound-DHT counters, to tell apart "DHT not feeding us" from "we're not
+        // sampling/fetching". Written on the worker thread.
+        std::atomic<qint64> m_statGetPeers = 0;        // get_peers queries observed
+        std::atomic<qint64> m_statLiveNodesSeen = 0;   // nodes returned by live_nodes alerts
+        std::atomic<qint64> m_statNodesDiscovered = 0; // nodes added to the frontier
+        std::atomic<qint64> m_statProbesSent = 0;      // dht_get_peers liveness probes issued
+        std::atomic<qint64> m_statProbeHits = 0;       // probes that returned >=1 live peer
+        std::atomic<qint64> m_statProbeMisses = 0;     // probes that returned no peers / timed out
+
+        // Periodic crawl-diagnostics log cadence (worker-thread only).
+        qint64 m_lastDiagLogMs = 0;
     };
 }
