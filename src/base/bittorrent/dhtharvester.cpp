@@ -58,22 +58,19 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace
 {
-    // BEP-51 active-crawl cadence and per-tick fan-out. Kept deliberately gentle:
-    // the harvester is a low-priority background indexer, so we trade crawl speed
-    // for a light, steady load that never disturbs the GUI.
-    const int SAMPLE_INTERVAL_MS = 12000;
-    const int MAX_SAMPLE_NODES_PER_TICK = 4;
-    // Bounded keyspace traversal: how many sample requests may be outstanding per
-    // tick (caps recursion) and how many returned nodes to recurse into per reply.
-    const int SAMPLE_BUDGET_PER_TICK = 8;
-    const int RECURSE_NODES_PER_SAMPLE = 1;
+    // BEP-51 active-crawl cadence and per-tick fan-out are runtime-tunable via
+    // HarvesterTuning (INI keys, see SessionImpl): the sampling cadence, how many
+    // live nodes to sample per tick, the per-tick budget that bounds keyspace
+    // recursion, how many returned nodes to recurse into per reply, and the
+    // metadata-fetch timeout. The harvester runs off the GUI thread, so the
+    // defaults are a moderate background-indexer profile rather than the old
+    // "deliberately gentle" trickle.
 
     // Metadata-fetch timeout housekeeping. Most DHT-sniffed infohashes have no
     // reachable peer (get_peers = someone *asking*, not *having*), so they hold a
     // fetch slot until timeout; a peer that does have it exchanges the small
     // info-dict within seconds, so a shorter timeout mainly frees dead slots.
     const int TIMEOUT_SWEEP_MS = 5000;
-    const qint64 METADATA_TIMEOUT_MS = 20 * 1000;
 
     // Metadata scheduler: periodically top up the fetch queue from the PERSISTENT
     // store (infohashes still lacking metadata, most promising first by
@@ -83,7 +80,7 @@ namespace
     // discovery firehose never grows memory; the store re-supplies as slots free.
     const int SCHEDULE_INTERVAL_MS = 3000;
     const int MAX_PENDING = 2000;
-    const int MAX_CONCURRENT_METADATA = 16;
+    const int MAX_CONCURRENT_METADATA = 64;
     const int SIGHTING_FLUSH_INTERVAL_MS = 1000;
     const int MAX_SIGHTING_BUFFER = 500;
 
@@ -213,7 +210,7 @@ void DHTHarvester::onThreadStarted()
     m_scheduleTimer = new QTimer(this);
     m_pruneTimer = new QTimer(this);
     m_sightingFlushTimer = new QTimer(this);
-    m_sampleTimer->setInterval(SAMPLE_INTERVAL_MS);
+    m_sampleTimer->setInterval(m_sampleIntervalMs);
     m_timeoutTimer->setInterval(TIMEOUT_SWEEP_MS);
     m_scheduleTimer->setInterval(SCHEDULE_INTERVAL_MS);
     m_pruneTimer->setInterval(PRUNE_INTERVAL_MS);
@@ -273,6 +270,27 @@ void DHTHarvester::setMaxConcurrentMetadata(const int max)
         return;
     }
     m_maxConcurrent = std::clamp(max, 1, MAX_CONCURRENT_METADATA);
+}
+
+void DHTHarvester::setTuning(const HarvesterTuning &tuning)
+{
+    if (m_workerStarted && (QThread::currentThread() != thread()))
+    {
+        QMetaObject::invokeMethod(this, [this, tuning] { setTuning(tuning); }, Qt::QueuedConnection);
+        return;
+    }
+
+    // Clamp to sane bounds: a misconfigured INI must never stall the crawl (e.g.
+    // a zero interval busy-loops the timer) or let it run unbounded.
+    m_sampleIntervalMs = std::clamp(tuning.sampleIntervalMs, 250, 5 * 60 * 1000);
+    m_maxSampleNodesPerTick = std::clamp(tuning.maxSampleNodesPerTick, 1, 200);
+    m_sampleBudgetPerTick = std::clamp(tuning.sampleBudgetPerTick, 1, 1000);
+    m_recurseNodesPerSample = std::clamp(tuning.recurseNodesPerSample, 0, 50);
+    m_metadataTimeoutMs = std::clamp(tuning.metadataTimeoutMs, 2000, 5 * 60 * 1000);
+
+    // Apply the cadence live; the timer may not exist yet (latched pre-start).
+    if (m_sampleTimer)
+        m_sampleTimer->setInterval(m_sampleIntervalMs);
 }
 
 void DHTHarvester::setBoundInterface(const QString &configName, const QString &humanName)
@@ -466,7 +484,7 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
                 int recursed = 0;
                 for (const auto &node : event.nodes)
                 {
-                    if ((recursed++ >= RECURSE_NODES_PER_SAMPLE) || (m_sampleBudget <= 0))
+                    if ((recursed++ >= m_recurseNodesPerSample) || (m_sampleBudget <= 0))
                         break;
                     if (const auto ep = toEndpoint(node.first, node.second))
                     {
@@ -484,7 +502,7 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
             int sampled = 0;
             for (const auto &node : event.nodes)
             {
-                if ((sampled++ >= MAX_SAMPLE_NODES_PER_TICK) || (m_sampleBudget <= 0))
+                if ((sampled++ >= m_maxSampleNodesPerTick) || (m_sampleBudget <= 0))
                     break;
                 if (const auto ep = toEndpoint(node.first, node.second))
                 {
@@ -549,7 +567,7 @@ void DHTHarvester::onSampleTimer()
 
     if (m_activeCrawl)
     {
-        m_sampleBudget = SAMPLE_BUDGET_PER_TICK;
+        m_sampleBudget = m_sampleBudgetPerTick;
         m_nativeSession->dht_live_nodes(randomTarget());
     }
 
@@ -562,7 +580,7 @@ void DHTHarvester::onTimeoutTimer()
     QStringList timedOut;
     for (auto it = m_inFlight.cbegin(); it != m_inFlight.cend(); ++it)
     {
-        if ((now - it.value()) > METADATA_TIMEOUT_MS)
+        if ((now - it.value()) > m_metadataTimeoutMs)
             timedOut.append(it.key());
     }
 

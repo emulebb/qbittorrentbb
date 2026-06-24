@@ -52,6 +52,7 @@ namespace BitTorrent
     class TorrentInfo;
     struct HarvestSighting;
     struct HarvestStats;
+    struct HarvesterTuning;
 
     // A DHT alert reduced to a thread-safe value. SessionImpl extracts the fields
     // it needs from the (short-lived, libtorrent-owned) lt::alert on the GUI thread
@@ -118,6 +119,9 @@ namespace BitTorrent
         bool isEnabled() const;
         void setActiveCrawlEnabled(bool enabled);
         void setMaxConcurrentMetadata(int max);
+        // Active-crawl throughput knobs (sample cadence/fan-out, fetch timeout).
+        // Applied live: the sampling timer interval is updated in place.
+        void setTuning(const HarvesterTuning &tuning);
         // Snapshot of the Session's bound (VPN) interface, since the harvester must
         // not read SessionImpl's CachedSettingValue members across threads.
         void setBoundInterface(const QString &configName, const QString &humanName);
@@ -178,6 +182,13 @@ namespace BitTorrent
         bool m_enabled = false;
         bool m_activeCrawl = true;
         int m_maxConcurrent = 8;
+        // Active-crawl throughput knobs, latched from Session INI via setTuning().
+        // Defaults mirror HarvesterTuning; SessionImpl overrides them at startup.
+        int m_sampleIntervalMs = 4000;
+        int m_maxSampleNodesPerTick = 10;
+        int m_sampleBudgetPerTick = 24;
+        int m_recurseNodesPerSample = 3;
+        int m_metadataTimeoutMs = 10000;
         bool m_running = false;
         bool m_warnedNoVPN = false;
         bool m_pumpScheduled = false;            // a coalesced pump() is already queued

@@ -95,6 +95,18 @@ namespace BitTorrent
         qint64 sightingCount = 0;    // total sighting rows
     };
 
+    // Active-crawl throughput knobs for the DHT harvester. All INI-tunable via
+    // BitTorrent\Session\DHTHarvester* keys (see SessionImpl for the keys and
+    // defaults); the defaults here are a safe fallback for a freestanding harvester.
+    struct HarvesterTuning
+    {
+        int sampleIntervalMs = 4000;       // cadence of the active BEP-51 sampling tick
+        int maxSampleNodesPerTick = 10;    // live-nodes sampled per tick
+        int sampleBudgetPerTick = 24;      // max outstanding sample requests per tick
+        int recurseNodesPerSample = 3;     // returned nodes recursed into per sample reply
+        int metadataTimeoutMs = 10000;     // how long a metadata fetch holds a slot
+    };
+
     struct HarvestPruneStats
     {
         qint64 torrentsPruned = 0;   // metadata-less / exhausted / over-cap rows removed

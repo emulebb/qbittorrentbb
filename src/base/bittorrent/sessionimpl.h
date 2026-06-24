@@ -204,6 +204,8 @@ namespace BitTorrent
         void setDHTHarvesterActiveCrawlEnabled(bool enabled) override;
         int DHTHarvesterMaxConcurrentMetadata() const override;
         void setDHTHarvesterMaxConcurrentMetadata(int value) override;
+        HarvesterTuning dhtHarvesterTuning() const override;
+        void setDHTHarvesterTuning(const HarvesterTuning &tuning) override;
         bool isAutoBanUnknownPeerEnabled() const override;
         void setAutoBanUnknownPeerEnabled(bool value) override;
         bool isAutoBanBTPlayerPeerEnabled() const override;
@@ -686,6 +688,11 @@ namespace BitTorrent
         CachedSettingValue<bool> m_isDHTHarvesterEnabled;
         CachedSettingValue<bool> m_isDHTHarvesterActiveCrawlEnabled;
         CachedSettingValue<int> m_dhtHarvesterMaxConcurrentMetadata;
+        CachedSettingValue<int> m_dhtHarvesterSampleIntervalMs;
+        CachedSettingValue<int> m_dhtHarvesterMaxSampleNodesPerTick;
+        CachedSettingValue<int> m_dhtHarvesterSampleBudgetPerTick;
+        CachedSettingValue<int> m_dhtHarvesterRecurseNodesPerSample;
+        CachedSettingValue<int> m_dhtHarvesterMetadataTimeoutMs;
         CachedSettingValue<bool> m_isAutoBanUnknownPeerEnabled;
         CachedSettingValue<bool> m_isAutoBanBTPlayerPeerEnabled;
         CachedSettingValue<bool> m_isShadowBanEnabled;

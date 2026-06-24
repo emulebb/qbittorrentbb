@@ -225,6 +225,10 @@ namespace BitTorrent
         virtual void setDHTHarvesterActiveCrawlEnabled(bool enabled) = 0;
         virtual int DHTHarvesterMaxConcurrentMetadata() const = 0;
         virtual void setDHTHarvesterMaxConcurrentMetadata(int value) = 0;
+        // Active-crawl throughput knobs (sample cadence/fan-out, fetch timeout),
+        // INI-tunable as a bundle so the abstract interface stays compact.
+        virtual HarvesterTuning dhtHarvesterTuning() const = 0;
+        virtual void setDHTHarvesterTuning(const HarvesterTuning &tuning) = 0;
         // Auto-ban (ported from qBittorrent Enhanced Edition). Bans apply to
         // upload only; the DHT harvester is exempt. Country lists use ISO 3166-1
         // alpha-2 codes resolved live via GeoIP.

@@ -452,7 +452,12 @@ SessionImpl::SessionImpl(QObject *parent)
     , m_isPeXEnabled(BITTORRENT_SESSION_KEY(u"PeXEnabled"_s), true)
     , m_isDHTHarvesterEnabled(BITTORRENT_SESSION_KEY(u"DHTHarvesterEnabled"_s), false)
     , m_isDHTHarvesterActiveCrawlEnabled(BITTORRENT_SESSION_KEY(u"DHTHarvesterActiveCrawl"_s), true)
-    , m_dhtHarvesterMaxConcurrentMetadata(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxConcurrentMetadata"_s), 8)
+    , m_dhtHarvesterMaxConcurrentMetadata(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxConcurrentMetadata"_s), 24)
+    , m_dhtHarvesterSampleIntervalMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterSampleIntervalMs"_s), 4000)
+    , m_dhtHarvesterMaxSampleNodesPerTick(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxSampleNodesPerTick"_s), 10)
+    , m_dhtHarvesterSampleBudgetPerTick(BITTORRENT_SESSION_KEY(u"DHTHarvesterSampleBudgetPerTick"_s), 24)
+    , m_dhtHarvesterRecurseNodesPerSample(BITTORRENT_SESSION_KEY(u"DHTHarvesterRecurseNodesPerSample"_s), 3)
+    , m_dhtHarvesterMetadataTimeoutMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterMetadataTimeoutMs"_s), 10000)
     , m_isAutoBanUnknownPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanUnknownPeer"_s), false)
     , m_isAutoBanBTPlayerPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanBTPlayerPeer"_s), false)
     , m_isShadowBanEnabled(BITTORRENT_SESSION_KEY(u"ShadowBan"_s), false)
@@ -879,6 +884,28 @@ void SessionImpl::setDHTHarvesterMaxConcurrentMetadata(const int value)
     m_dhtHarvesterMaxConcurrentMetadata = value;
     if (m_dhtHarvester)
         m_dhtHarvester->setMaxConcurrentMetadata(value);
+}
+
+HarvesterTuning SessionImpl::dhtHarvesterTuning() const
+{
+    HarvesterTuning tuning;
+    tuning.sampleIntervalMs = m_dhtHarvesterSampleIntervalMs;
+    tuning.maxSampleNodesPerTick = m_dhtHarvesterMaxSampleNodesPerTick;
+    tuning.sampleBudgetPerTick = m_dhtHarvesterSampleBudgetPerTick;
+    tuning.recurseNodesPerSample = m_dhtHarvesterRecurseNodesPerSample;
+    tuning.metadataTimeoutMs = m_dhtHarvesterMetadataTimeoutMs;
+    return tuning;
+}
+
+void SessionImpl::setDHTHarvesterTuning(const HarvesterTuning &tuning)
+{
+    m_dhtHarvesterSampleIntervalMs = tuning.sampleIntervalMs;
+    m_dhtHarvesterMaxSampleNodesPerTick = tuning.maxSampleNodesPerTick;
+    m_dhtHarvesterSampleBudgetPerTick = tuning.sampleBudgetPerTick;
+    m_dhtHarvesterRecurseNodesPerSample = tuning.recurseNodesPerSample;
+    m_dhtHarvesterMetadataTimeoutMs = tuning.metadataTimeoutMs;
+    if (m_dhtHarvester)
+        m_dhtHarvester->setTuning(tuning);
 }
 
 // Auto-ban settings. Changes take effect on the next session restart, since the
@@ -2119,6 +2146,7 @@ void SessionImpl::initializeNativeSession()
     m_dhtHarvester->setBoundInterface(networkInterface(), networkInterfaceName());
     m_dhtHarvester->setActiveCrawlEnabled(isDHTHarvesterActiveCrawlEnabled());
     m_dhtHarvester->setMaxConcurrentMetadata(DHTHarvesterMaxConcurrentMetadata());
+    m_dhtHarvester->setTuning(dhtHarvesterTuning());
     m_dhtHarvester->setEnabled(isDHTHarvesterEnabled());
     m_dhtHarvester->startWorker();
 }
@@ -2405,31 +2433,32 @@ lt::settings_pack SessionImpl::loadLTSettings() const
     settingsPack.set_int(lt::settings_pack::active_lsd_limit, -1);
     settingsPack.set_int(lt::settings_pack::alert_queue_size, std::numeric_limits<int>::max() / 2);
 
-    // DHT harvester tuning: a *background* discovery profile. We still lift the DHT
-    // throttle enough to receive a healthy stream of incoming get_peers/announce
-    // traffic (passive discovery) and answer it, but deliberately stay well below
-    // the previous aggressive settings so the crawler's load on CPU, the network,
-    // and the (now off-GUI-thread) harvester stays light. These only take effect
-    // while the harvester is enabled.
+    // DHT harvester tuning: a moderate discovery profile. We lift the DHT throttle
+    // enough to both receive a healthy stream of incoming get_peers/announce traffic
+    // (passive discovery) and sustain the active BEP-51 keyspace walk, while staying
+    // below the old all-out settings. The harvester now runs off the GUI thread, so
+    // the bottleneck the previous "gentle" profile guarded against (alert extraction
+    // on the GUI thread) is gone. These only take effect while the harvester is enabled.
     if (isDHTHarvesterEnabled())
     {
-        // Serve more DHT traffic than the default 8 KiB/s so we stay reachable to
-        // the swarm and our replies aren't dropped, but a quarter of the old cap.
-        settingsPack.set_int(lt::settings_pack::dht_upload_rate_limit, 16 * 1024);
+        // Serve well above the default 8 KiB/s so we stay reachable to the swarm and
+        // our query replies aren't dropped under crawl load.
+        settingsPack.set_int(lt::settings_pack::dht_upload_rate_limit, 32 * 1024);
         // Don't ban peers that flood us with queries — that's exactly the traffic
         // a passive harvester wants to keep seeing.
         settingsPack.set_int(lt::settings_pack::dht_block_ratelimit, 50);
-        // A moderate peer/torrent store: enough keyspace coverage without the
-        // memory and bookkeeping cost of the previous 5000-item tables.
-        settingsPack.set_int(lt::settings_pack::dht_max_peers, 500);
-        settingsPack.set_int(lt::settings_pack::dht_max_torrents, 2000);
-        settingsPack.set_int(lt::settings_pack::dht_max_dht_items, 2000);
-        // Enough peers per get_peers reply for usable swarm counts (B1).
-        settingsPack.set_int(lt::settings_pack::dht_max_peers_reply, 50);
+        // A larger peer/torrent store widens keyspace coverage (more infohashes
+        // observed) at a moderate memory/bookkeeping cost.
+        settingsPack.set_int(lt::settings_pack::dht_max_peers, 750);
+        settingsPack.set_int(lt::settings_pack::dht_max_torrents, 4000);
+        settingsPack.set_int(lt::settings_pack::dht_max_dht_items, 4000);
+        // More peers per get_peers reply -> better real swarm counts (B1).
+        settingsPack.set_int(lt::settings_pack::dht_max_peers_reply, 100);
         settingsPack.set_int(lt::settings_pack::dht_announce_interval, 60);
-        // Aggressive lookups multiply query fan-out and the returned-alert volume
-        // the GUI thread must extract; leave them off for a steady background load.
-        settingsPack.set_bool(lt::settings_pack::dht_aggressive_lookups, false);
+        // Aggressive lookups multiply find_node/get_peers fan-out, which directly
+        // feeds the active crawl's node discovery. Now that alert extraction is off
+        // the GUI thread, enable it for a crawler-grade lookup rate.
+        settingsPack.set_bool(lt::settings_pack::dht_aggressive_lookups, true);
     }
 
     // Outgoing ports
