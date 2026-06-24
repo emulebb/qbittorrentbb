@@ -24,6 +24,7 @@ add_library(qbt_base STATIC
     bittorrent/filterparserthread.h
     bittorrent/harvestcontentclassifier.h
     bittorrent/harveststore.h
+    bittorrent/trackerscraper.h
     bittorrent/infohash.h
     bittorrent/loadtorrentparams.h
     bittorrent/ltqbitarray.h
@@ -150,6 +151,7 @@ add_library(qbt_base STATIC
     bittorrent/filterparserthread.cpp
     bittorrent/harvestcontentclassifier.cpp
     bittorrent/harveststore.cpp
+    bittorrent/trackerscraper.cpp
     bittorrent/infohash.cpp
     bittorrent/ltqbitarray.cpp
     bittorrent/nativesessionextension.cpp
