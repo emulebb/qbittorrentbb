@@ -91,11 +91,29 @@ namespace BitTorrent
         qint64 total = 0;  // full count across all pages, for paginated callers
     };
 
-    // One content-type bucket and its row count, for the grouped index tree.
+    // One content-type bucket and its row count, for the filter sidebar.
     struct HarvestTypeCount
     {
         QString contentType;
         qint64 count = 0;
+    };
+
+    // Sort options for the windowed index reads (each maps to an ORDER BY column).
+    // Default keeps the natural order: search relevance for queries, recency for the
+    // feed. A deterministic id tiebreaker is always appended so windowed pagination
+    // (LIMIT/OFFSET) never overlaps or skips rows.
+    enum class HarvestSortColumn
+    {
+        Default,
+        Name,
+        Content,
+        Size,
+        Files,
+        Seeds,
+        Leechers,
+        Sightings,
+        FirstSeen,
+        LastSeen
     };
 
     struct HarvestStats
@@ -175,14 +193,18 @@ namespace BitTorrent
         void updateTrackerScrape(const QString &infoHashV1, int seeds, int leechers);
 
         // Readers (may be invoked via BlockingQueuedConnection from the GUI).
-        BitTorrent::HarvestSearchPage search(const QString &query, int limit, int offset) const;
-        BitTorrent::HarvestSearchPage recent(int limit, int offset) const;
-        // Per-content-type row counts that back the grouped index tree. Empty query
-        // counts metadata-complete torrents; a query counts FTS matches.
+        BitTorrent::HarvestSearchPage search(const QString &query, int limit, int offset
+            , BitTorrent::HarvestSortColumn sortColumn = BitTorrent::HarvestSortColumn::Default, bool descending = false) const;
+        BitTorrent::HarvestSearchPage recent(int limit, int offset
+            , BitTorrent::HarvestSortColumn sortColumn = BitTorrent::HarvestSortColumn::Default, bool descending = false) const;
+        // Per-content-type row counts that back the filter sidebar. Empty query counts
+        // metadata-complete torrents; a query counts FTS matches.
         QList<BitTorrent::HarvestTypeCount> typeCounts(const QString &query) const;
-        // Windowed reads scoped to a single content type (drive lazy tree children).
-        BitTorrent::HarvestSearchPage searchByType(const QString &query, const QString &contentType, int limit, int offset) const;
-        BitTorrent::HarvestSearchPage recentByType(const QString &contentType, int limit, int offset) const;
+        // Windowed reads scoped to a single content type (drive the table under a filter).
+        BitTorrent::HarvestSearchPage searchByType(const QString &query, const QString &contentType, int limit, int offset
+            , BitTorrent::HarvestSortColumn sortColumn = BitTorrent::HarvestSortColumn::Default, bool descending = false) const;
+        BitTorrent::HarvestSearchPage recentByType(const QString &contentType, int limit, int offset
+            , BitTorrent::HarvestSortColumn sortColumn = BitTorrent::HarvestSortColumn::Default, bool descending = false) const;
         QByteArray metadataFor(const QString &infoHashV1) const;
         BitTorrent::HarvestStats stats() const;
 

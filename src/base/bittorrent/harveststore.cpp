@@ -124,6 +124,38 @@ namespace
         return row;
     }
 
+    // Build the ORDER BY body for a windowed read. Default keeps the natural order
+    // (search relevance / feed recency); an explicit column maps to its SQL expression.
+    // A deterministic "t.id ASC" tiebreaker is always appended so LIMIT/OFFSET windows
+    // never overlap or skip rows. (Sightings sorts by the indexed availability_score,
+    // a cheap monotonic proxy for the displayed sighting count.)
+    QString orderByClause(const BitTorrent::HarvestSortColumn col, const bool descending, const bool isSearch)
+    {
+        using SC = BitTorrent::HarvestSortColumn;
+        if (col == SC::Default)
+        {
+            return isSearch
+                    ? u"bm25(torrent_name_fts), t.availability_score DESC, t.last_seen_ms DESC, t.id ASC"_s
+                    : u"t.first_seen_ms DESC, t.id ASC"_s;
+        }
+
+        QString expr;
+        switch (col)
+        {
+        case SC::Name: expr = u"t.name"_s; break;
+        case SC::Content: expr = u"t.content_type"_s; break;
+        case SC::Size: expr = u"t.size_bytes"_s; break;
+        case SC::Files: expr = u"t.file_count"_s; break;
+        case SC::Seeds: expr = u"t.tracker_seeds"_s; break;
+        case SC::Leechers: expr = u"t.tracker_leechers"_s; break;
+        case SC::Sightings: expr = u"t.availability_score"_s; break;
+        case SC::FirstSeen: expr = u"t.first_seen_ms"_s; break;
+        case SC::LastSeen: expr = u"t.last_seen_ms"_s; break;
+        default: expr = u"t.last_seen_ms"_s; break;
+        }
+        return expr + (descending ? u" DESC"_s : u" ASC"_s) + u", t.id ASC"_s;
+    }
+
     QList<BitTorrent::HarvestedFile> filesForTorrent(QSqlDatabase &db, const qint64 torrentId)
     {
         QList<BitTorrent::HarvestedFile> files;
@@ -613,7 +645,8 @@ bool HarvestStore::needsMetadata(const QString &infoHashV1) const
     return true;
 }
 
-HarvestSearchPage HarvestStore::search(const QString &queryText, int limit, int offset) const
+HarvestSearchPage HarvestStore::search(const QString &queryText, int limit, int offset
+        , HarvestSortColumn sortColumn, bool descending) const
 {
     HarvestSearchPage page;
 
@@ -635,8 +668,8 @@ HarvestSearchPage HarvestStore::search(const QString &queryText, int limit, int 
                   + u" FROM torrent_name_fts f"
                   u" JOIN torrents t ON t.id = f.rowid"
                   u" WHERE torrent_name_fts MATCH :match"
-                  u" ORDER BY bm25(torrent_name_fts), t.availability_score DESC, t.last_seen_ms DESC"
-                  u" LIMIT :limit OFFSET :offset;"_s);
+                  u" ORDER BY "_s + orderByClause(sortColumn, descending, true)
+                  + u" LIMIT :limit OFFSET :offset;"_s);
     query.bindValue(u":match"_s, match);
     query.bindValue(u":limit"_s, limit);
     query.bindValue(u":offset"_s, offset);
@@ -652,7 +685,8 @@ HarvestSearchPage HarvestStore::search(const QString &queryText, int limit, int 
     return page;
 }
 
-HarvestSearchPage HarvestStore::recent(int limit, int offset) const
+HarvestSearchPage HarvestStore::recent(int limit, int offset
+        , HarvestSortColumn sortColumn, bool descending) const
 {
     HarvestSearchPage page;
 
@@ -668,8 +702,8 @@ HarvestSearchPage HarvestStore::recent(int limit, int offset) const
     query.prepare(u"SELECT "_s + SELECT_RESULT_COLS
                   + u" FROM torrents t"
                   u" WHERE t.metadata_fetched = 1"
-                  u" ORDER BY t.first_seen_ms DESC"
-                  u" LIMIT :limit OFFSET :offset;"_s);
+                  u" ORDER BY "_s + orderByClause(sortColumn, descending, false)
+                  + u" LIMIT :limit OFFSET :offset;"_s);
     query.bindValue(u":limit"_s, limit);
     query.bindValue(u":offset"_s, offset);
     if (!query.exec())
@@ -717,7 +751,8 @@ QList<HarvestTypeCount> HarvestStore::typeCounts(const QString &queryText) const
     return out;
 }
 
-HarvestSearchPage HarvestStore::searchByType(const QString &queryText, const QString &contentType, int limit, int offset) const
+HarvestSearchPage HarvestStore::searchByType(const QString &queryText, const QString &contentType, int limit, int offset
+        , HarvestSortColumn sortColumn, bool descending) const
 {
     HarvestSearchPage page;
 
@@ -740,8 +775,8 @@ HarvestSearchPage HarvestStore::searchByType(const QString &queryText, const QSt
                   + u" FROM torrent_name_fts f"
                   u" JOIN torrents t ON t.id = f.rowid"
                   u" WHERE torrent_name_fts MATCH :match AND t.content_type = :type"
-                  u" ORDER BY bm25(torrent_name_fts), t.availability_score DESC, t.last_seen_ms DESC"
-                  u" LIMIT :limit OFFSET :offset;"_s);
+                  u" ORDER BY "_s + orderByClause(sortColumn, descending, true)
+                  + u" LIMIT :limit OFFSET :offset;"_s);
     query.bindValue(u":match"_s, match);
     query.bindValue(u":type"_s, contentType);
     query.bindValue(u":limit"_s, limit);
@@ -758,7 +793,8 @@ HarvestSearchPage HarvestStore::searchByType(const QString &queryText, const QSt
     return page;
 }
 
-HarvestSearchPage HarvestStore::recentByType(const QString &contentType, int limit, int offset) const
+HarvestSearchPage HarvestStore::recentByType(const QString &contentType, int limit, int offset
+        , HarvestSortColumn sortColumn, bool descending) const
 {
     HarvestSearchPage page;
 
@@ -774,8 +810,8 @@ HarvestSearchPage HarvestStore::recentByType(const QString &contentType, int lim
     query.prepare(u"SELECT "_s + SELECT_RESULT_COLS
                   + u" FROM torrents t"
                   u" WHERE t.metadata_fetched = 1 AND t.content_type = :type"
-                  u" ORDER BY t.first_seen_ms DESC"
-                  u" LIMIT :limit OFFSET :offset;"_s);
+                  u" ORDER BY "_s + orderByClause(sortColumn, descending, false)
+                  + u" LIMIT :limit OFFSET :offset;"_s);
     query.bindValue(u":type"_s, contentType);
     query.bindValue(u":limit"_s, limit);
     query.bindValue(u":offset"_s, offset);
