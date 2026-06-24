@@ -64,6 +64,7 @@ private slots:
     void onEnabledToggled(bool enabled);
     void onIntensityChanged(int presetIndex);
     void onFilterChanged();
+    void onHeaderClicked(int column);
     void onSelectionChanged();
     void onItemDoubleClicked(const QModelIndex &index);
     void downloadSelected();
@@ -88,4 +89,6 @@ private:
     HarvestContentHandler *m_contentHandler = nullptr;
     QTimer *m_statsTimer = nullptr;
     QString m_query;
+    int m_sortColumn = -1;                     // active sort view-column (-1 = natural order)
+    Qt::SortOrder m_sortOrder = Qt::AscendingOrder;
 };

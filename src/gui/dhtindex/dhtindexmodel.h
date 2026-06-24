@@ -78,6 +78,11 @@ public:
     void setFilter(const QString &query, const QString &contentType);
     QString query() const;
 
+    // Apply a server-side sort and reload the window from the top.
+    void setSort(BitTorrent::HarvestSortColumn sortColumn, bool descending);
+    // Map a view column to its sort key (COL_* -> HarvestSortColumn).
+    static BitTorrent::HarvestSortColumn sortColumnForView(int viewColumn);
+
     // The infohash for a row index (empty if invalid), for selection/download.
     QString infoHashForIndex(const QModelIndex &index) const;
 
@@ -91,8 +96,12 @@ private:
     BitTorrent::HarvestSearchPage fetchPage(int offset) const;
     void scrapeStale(const QList<BitTorrent::HarvestSearchResult> &rows);
 
+    void reload();            // reset the window and load the first page for current state
+
     QString m_query;          // current FTS query ("" = recent feed)
     QString m_contentType;    // current type filter ("" = all types)
+    BitTorrent::HarvestSortColumn m_sortColumn = BitTorrent::HarvestSortColumn::Default;
+    bool m_descending = false;
     QList<BitTorrent::HarvestSearchResult> m_rows;
     qint64 m_total = 0;       // total rows for this filter (for canFetchMore)
 };

@@ -197,6 +197,12 @@ DHTIndexWidget::DHTIndexWidget(QWidget *parent)
     header->setSectionResizeMode(QHeaderView::Interactive);  // user-resizable columns
     header->setSectionsMovable(true);
     header->setStretchLastSection(false);
+    // Server-side sort: clicking a header re-issues the windowed query with an ORDER BY
+    // for that column (the view itself does not sort the partial window).
+    header->setSectionsClickable(true);
+    header->setSortIndicatorShown(true);
+    header->setSortIndicator(-1, Qt::AscendingOrder);  // no indicator until the user sorts
+    connect(header, &QHeaderView::sectionClicked, this, &DHTIndexWidget::onHeaderClicked);
     m_table->setColumnWidth(DHTIndexModel::COL_NAME, 360);
     m_table->setColumnWidth(DHTIndexModel::COL_CONTENT, 80);
     m_table->setColumnWidth(DHTIndexModel::COL_SIZE, 90);
@@ -334,6 +340,23 @@ QString DHTIndexWidget::currentFilterType() const
 void DHTIndexWidget::onFilterChanged()
 {
     m_model->setFilter(m_query, currentFilterType());
+}
+
+void DHTIndexWidget::onHeaderClicked(const int column)
+{
+    if (column == m_sortColumn)
+    {
+        m_sortOrder = (m_sortOrder == Qt::AscendingOrder) ? Qt::DescendingOrder : Qt::AscendingOrder;
+    }
+    else
+    {
+        m_sortColumn = column;
+        // Text columns read best ascending; sizes/counts/dates best descending.
+        m_sortOrder = ((column == DHTIndexModel::COL_NAME) || (column == DHTIndexModel::COL_CONTENT))
+                ? Qt::AscendingOrder : Qt::DescendingOrder;
+    }
+    m_table->horizontalHeader()->setSortIndicator(m_sortColumn, m_sortOrder);
+    m_model->setSort(DHTIndexModel::sortColumnForView(m_sortColumn), (m_sortOrder == Qt::DescendingOrder));
 }
 
 void DHTIndexWidget::onItemDoubleClicked(const QModelIndex &index)

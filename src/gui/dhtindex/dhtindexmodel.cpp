@@ -193,15 +193,45 @@ void DHTIndexModel::fetchMore(const QModelIndex &parent)
 
 void DHTIndexModel::setFilter(const QString &query, const QString &contentType)
 {
-    beginResetModel();
     m_query = query;
     m_contentType = contentType;
+    reload();
+}
+
+void DHTIndexModel::setSort(const BitTorrent::HarvestSortColumn sortColumn, const bool descending)
+{
+    m_sortColumn = sortColumn;
+    m_descending = descending;
+    reload();
+}
+
+void DHTIndexModel::reload()
+{
+    beginResetModel();
     const BitTorrent::HarvestSearchPage page = fetchPage(0);
     m_rows = page.items;
     m_total = page.total;
     endResetModel();
 
     scrapeStale(m_rows);
+}
+
+BitTorrent::HarvestSortColumn DHTIndexModel::sortColumnForView(const int viewColumn)
+{
+    using SC = BitTorrent::HarvestSortColumn;
+    switch (viewColumn)
+    {
+    case COL_NAME: return SC::Name;
+    case COL_CONTENT: return SC::Content;
+    case COL_SIZE: return SC::Size;
+    case COL_FILES: return SC::Files;
+    case COL_SEEDS: return SC::Seeds;
+    case COL_PEERS: return SC::Leechers;
+    case COL_SIGHTINGS: return SC::Sightings;
+    case COL_FIRSTSEEN: return SC::FirstSeen;
+    case COL_LASTSEEN: return SC::LastSeen;
+    default: return SC::Default;
+    }
 }
 
 QString DHTIndexModel::query() const
@@ -215,12 +245,12 @@ BitTorrent::HarvestSearchPage DHTIndexModel::fetchPage(const int offset) const
     if (m_contentType.isEmpty())
     {
         return m_query.isEmpty()
-                ? session->recentDHTIndex(PAGE, offset)
-                : session->searchDHTIndex(m_query, PAGE, offset);
+                ? session->recentDHTIndex(PAGE, offset, m_sortColumn, m_descending)
+                : session->searchDHTIndex(m_query, PAGE, offset, m_sortColumn, m_descending);
     }
     return m_query.isEmpty()
-            ? session->recentDHTIndexByType(m_contentType, PAGE, offset)
-            : session->searchDHTIndexByType(m_query, m_contentType, PAGE, offset);
+            ? session->recentDHTIndexByType(m_contentType, PAGE, offset, m_sortColumn, m_descending)
+            : session->searchDHTIndexByType(m_query, m_contentType, PAGE, offset, m_sortColumn, m_descending);
 }
 
 QString DHTIndexModel::infoHashForIndex(const QModelIndex &index) const
