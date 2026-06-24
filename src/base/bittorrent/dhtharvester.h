@@ -73,11 +73,13 @@ namespace BitTorrent
 
         Type type;
         QString infoHashHex;                  // GetPeers / Announce / GetPeersReply
-        QString ip;                           // Announce
-        int port = 0;                         // Announce
+        QString ip;                           // Announce peer / SampleInfohashes responding node
+        int port = 0;                         // Announce peer / SampleInfohashes responding node
         int numPeers = 0;                     // GetPeersReply
+        int numInfohashes = 0;                // SampleInfohashes: total keys the responding node holds
+        int intervalSec = 0;                  // SampleInfohashes: min seconds before re-sampling that node
         QList<QString> samples;               // SampleInfohashes (hex infohashes)
-        QList<QPair<QString, quint16>> nodes; // sample/live-node/peer-connect endpoints to recurse into
+        QList<QPair<QString, quint16>> nodes; // sample/live-node/peer-connect endpoints to traverse into
     };
 
     // Magnetico/btdigg-style BitTorrent DHT harvester.
@@ -165,6 +167,12 @@ namespace BitTorrent
         void requestPump();       // coalesce pump() to at most once per event-loop turn
         void postSighting(const QString &infoHashV1, const QString &source, const QString &ip, int port);
         bool vpnReady() const;
+        // Add a freshly discovered DHT node to the sampling frontier (deduped,
+        // capped). Newly added nodes are immediately due for a BEP-51 sample.
+        void discoverNode(const QString &ip, quint16 port);
+        // Issue up to m_sampleBudgetPerTick BEP-51 sample_infohashes requests to the
+        // most promising frontier nodes that are off their per-node interval.
+        void drainFrontier();
 
         Session *m_session = nullptr;
         lt::session *m_nativeSession = nullptr;
@@ -202,11 +210,37 @@ namespace BitTorrent
         QSet<QString> m_done;               // fetched this session
         QList<HarvestSighting> m_sightingBuffer;
 
+        // BEP-51 sampling frontier: every DHT node we have discovered (via live-node
+        // seeding, sample replies, and swarm peer connects), keyed by "ip:port". The
+        // active crawl walks the keyspace by repeatedly sampling these nodes -- each
+        // sample reply hands back closer nodes, which are added here in turn -- while
+        // honouring each node's advertised re-sample interval and preferring nodes
+        // that hold more infohashes.
+        struct NodeState
+        {
+            QString ip;
+            quint16 port = 0;
+            qint64 lastSampledMs = 0;  // 0 = never sampled (due immediately)
+            int intervalSec = 0;       // node-advertised min seconds between samples
+            int numInfohashes = 0;     // keys the node reported holding (priority hint)
+        };
+        QHash<QString, NodeState> m_nodes;  // "ip:port" -> state
+
         QTimer *m_sampleTimer = nullptr;
         QTimer *m_timeoutTimer = nullptr;
         QTimer *m_scheduleTimer = nullptr;
         QTimer *m_pruneTimer = nullptr;
         QTimer *m_sightingFlushTimer = nullptr;
-        int m_sampleBudget = 0;  // per-tick cap on outstanding BEP-51 sample requests
+
+        // Live-crawl diagnostics. Written on the worker thread, read lock-free from
+        // any thread via fillRuntimeStats(). Cumulative counters plus current gauges.
+        std::atomic<qint64> m_statSamplesSent = 0;
+        std::atomic<qint64> m_statSampleReplies = 0;
+        std::atomic<qint64> m_statAnnounces = 0;
+        std::atomic<qint64> m_statMetadataOk = 0;
+        std::atomic<qint64> m_statMetadataTimeouts = 0;
+        std::atomic<int> m_statTrackedNodes = 0;
+        std::atomic<int> m_statPending = 0;
+        std::atomic<int> m_statInFlight = 0;
     };
 }

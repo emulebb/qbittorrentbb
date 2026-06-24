@@ -6177,6 +6177,12 @@ void SessionImpl::dispatchHarvesterAlert(const lt::alert *alert)
         {
             const auto *a = static_cast<const lt::dht_sample_infohashes_alert *>(alert);
             event.type = HarvestAlertEvent::Type::SampleInfohashes;
+            // The responding node: lets the harvester record this node's BEP-51
+            // re-sample interval and infohash count for frontier scheduling.
+            event.ip = QString::fromStdString(a->endpoint.address().to_string());
+            event.port = a->endpoint.port();
+            event.numInfohashes = a->num_infohashes;
+            event.intervalSec = static_cast<int>(lt::total_seconds(a->interval));
             for (const lt::sha1_hash &sample : a->samples())
                 event.samples.append(SHA1Hash(sample).toString());
             for (const auto &node : a->nodes())

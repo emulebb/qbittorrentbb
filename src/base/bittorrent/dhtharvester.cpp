@@ -81,6 +81,12 @@ namespace
     const int SCHEDULE_INTERVAL_MS = 3000;
     const int MAX_PENDING = 2000;
     const int MAX_CONCURRENT_METADATA = 64;
+
+    // BEP-51 sampling frontier cap. The keyspace walk discovers nodes far faster
+    // than they can be sampled, so the frontier is bounded; when full, exhausted
+    // nodes (sampled at least once, reporting zero infohashes) are recycled to make
+    // room before new discoveries are dropped. 20k endpoints is a few MiB of state.
+    const int MAX_TRACKED_NODES = 20000;
     const int SIGHTING_FLUSH_INTERVAL_MS = 1000;
     const int MAX_SIGHTING_BUFFER = 500;
 
@@ -399,6 +405,7 @@ void DHTHarvester::stop()
     m_queued.clear();
     m_done.clear();
     m_sightingBuffer.clear();
+    m_nodes.clear();
     m_candidateRequestInFlight = false;
 
     // The store (persistent SQLite index) is intentionally NOT torn down here: it
@@ -459,6 +466,7 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
         break;
     case HarvestAlertEvent::Type::Announce:
         {
+            m_statAnnounces.fetch_add(1, std::memory_order_relaxed);
             postSighting(event.infoHashHex, u"announce"_s, event.ip, event.port);
             enqueue(event.infoHashHex);  // a peer HAS it -> fetch immediately
             // The announcing peer holds the torrent: feed it straight to the
@@ -475,23 +483,28 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
         break;
     case HarvestAlertEvent::Type::SampleInfohashes:
         {
+            m_statSampleReplies.fetch_add(1, std::memory_order_relaxed);
             for (const QString &ih : event.samples)
                 postSighting(ih, u"sample"_s, {}, 0);
-            // Recurse into the returned (closer) nodes to traverse this region of
-            // the keyspace more deeply, bounded by the per-tick sample budget.
-            if (m_activeCrawl)
+            if (!m_activeCrawl)
+                break;
+            // Record this node's BEP-51 state so the frontier re-samples it only
+            // after its advertised interval and prioritises high-infohash nodes.
+            const QString key = event.ip + u':' + QString::number(event.port);
+            if (const auto it = m_nodes.find(key); it != m_nodes.end())
             {
-                int recursed = 0;
-                for (const auto &node : event.nodes)
-                {
-                    if ((recursed++ >= m_recurseNodesPerSample) || (m_sampleBudget <= 0))
-                        break;
-                    if (const auto ep = toEndpoint(node.first, node.second))
-                    {
-                        m_nativeSession->dht_sample_infohashes(*ep, randomTarget());
-                        --m_sampleBudget;
-                    }
-                }
+                it->lastSampledMs = nowMs();
+                it->intervalSec = event.intervalSec;
+                it->numInfohashes = event.numInfohashes;
+            }
+            // Walk the keyspace: the reply hands back nodes closer to the (random)
+            // target. Add a bounded number to the frontier to be sampled in turn.
+            int recursed = 0;
+            for (const auto &node : event.nodes)
+            {
+                if (recursed++ >= m_recurseNodesPerSample)
+                    break;
+                discoverNode(node.first, node.second);
             }
         }
         break;
@@ -499,16 +512,14 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
         {
             if (!m_activeCrawl)
                 break;
-            int sampled = 0;
+            // Seed the frontier from routing-table nodes near a random target;
+            // sampling itself happens on the timer via drainFrontier().
+            int added = 0;
             for (const auto &node : event.nodes)
             {
-                if ((sampled++ >= m_maxSampleNodesPerTick) || (m_sampleBudget <= 0))
+                if (added++ >= m_maxSampleNodesPerTick)
                     break;
-                if (const auto ep = toEndpoint(node.first, node.second))
-                {
-                    m_nativeSession->dht_sample_infohashes(*ep, randomTarget());
-                    --m_sampleBudget;
-                }
+                discoverNode(node.first, node.second);
             }
         }
         break;
@@ -530,15 +541,11 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
             // Seed BEP-51 sampling from the DHT nodes of peers we connect to in
             // swarms (our own ephemeral metadata fetches and real torrents alike).
             // A swarm peer is a live, reachable host whose DHT node stores the
-            // infohashes announced near it -> a high-quality sample target.
-            if (!m_activeCrawl || (m_sampleBudget <= 0) || event.nodes.isEmpty())
+            // infohashes announced near it -> a high-quality frontier seed.
+            if (!m_activeCrawl || event.nodes.isEmpty())
                 break;
             const auto &node = event.nodes.first();
-            if (const auto ep = toEndpoint(node.first, node.second))
-            {
-                m_nativeSession->dht_sample_infohashes(*ep, randomTarget());
-                --m_sampleBudget;
-            }
+            discoverNode(node.first, node.second);
         }
         break;
     }
@@ -567,11 +574,105 @@ void DHTHarvester::onSampleTimer()
 
     if (m_activeCrawl)
     {
-        m_sampleBudget = m_sampleBudgetPerTick;
+        // Keep feeding the frontier with fresh routing-table nodes near a random
+        // target (-> LiveNodes alert -> discoverNode), then sample the most
+        // promising due nodes already in the frontier.
         m_nativeSession->dht_live_nodes(randomTarget());
+        drainFrontier();
     }
 
     pump();
+
+    // Refresh the gauge diagnostics once per tick (cheap, off-GUI-thread).
+    m_statTrackedNodes.store(static_cast<int>(m_nodes.size()), std::memory_order_relaxed);
+    m_statPending.store(static_cast<int>(m_pending.size()), std::memory_order_relaxed);
+    m_statInFlight.store(static_cast<int>(m_inFlight.size()), std::memory_order_relaxed);
+}
+
+void DHTHarvester::discoverNode(const QString &ip, const quint16 port)
+{
+    if (ip.isEmpty() || (port == 0))
+        return;
+
+    const QString key = ip + u':' + QString::number(port);
+    if (m_nodes.contains(key))
+        return;
+
+    // Full frontier: drop the discovery. drainFrontier() recycles exhausted nodes
+    // each tick, so this is rarely hit and keeps discovery O(1) under the firehose.
+    if (m_nodes.size() >= MAX_TRACKED_NODES)
+        return;
+
+    NodeState state;
+    state.ip = ip;
+    state.port = port;
+    m_nodes.insert(key, state);  // lastSampledMs == 0 -> due for sampling immediately
+}
+
+void DHTHarvester::drainFrontier()
+{
+    if (m_nodes.isEmpty())
+        return;
+
+    const qint64 now = nowMs();
+
+    // Single pass: collect nodes due for (re)sampling and, at the same time, mark
+    // exhausted nodes (already sampled, holding no infohashes and past their
+    // interval) for recycling so the frontier stays productive.
+    QList<QString> due;
+    QList<QString> exhausted;
+    for (auto it = m_nodes.cbegin(); it != m_nodes.cend(); ++it)
+    {
+        const NodeState &n = it.value();
+        if (n.lastSampledMs == 0)
+        {
+            due.append(it.key());  // never sampled -> frontier expansion
+            continue;
+        }
+        const qint64 nextDueMs = n.lastSampledMs + (qint64(qMax(n.intervalSec, 1)) * 1000);
+        if (now < nextDueMs)
+            continue;  // still within the node's advertised re-sample interval
+        if (n.numInfohashes <= 0)
+            exhausted.append(it.key());  // gave nothing last time -> recycle
+        else
+            due.append(it.key());
+    }
+
+    for (const QString &key : exhausted)
+        m_nodes.remove(key);
+
+    if (due.isEmpty())
+        return;
+
+    // Prefer never-sampled nodes (they expand the keyspace walk), then the nodes
+    // reporting the most infohashes (richest to re-sample).
+    std::sort(due.begin(), due.end(), [this](const QString &a, const QString &b)
+    {
+        const NodeState &na = m_nodes[a];
+        const NodeState &nb = m_nodes[b];
+        const bool aNew = (na.lastSampledMs == 0);
+        const bool bNew = (nb.lastSampledMs == 0);
+        if (aNew != bNew)
+            return aNew;
+        return na.numInfohashes > nb.numInfohashes;
+    });
+
+    int issued = 0;
+    for (const QString &key : due)
+    {
+        if (issued >= m_sampleBudgetPerTick)
+            break;
+        const auto it = m_nodes.find(key);
+        if (it == m_nodes.end())
+            continue;
+        if (const auto ep = toEndpoint(it->ip, it->port))
+        {
+            m_nativeSession->dht_sample_infohashes(*ep, randomTarget());
+            it->lastSampledMs = now;  // optimistic; refined when the reply arrives
+            ++issued;
+            m_statSamplesSent.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
 }
 
 void DHTHarvester::onTimeoutTimer()
@@ -590,6 +691,7 @@ void DHTHarvester::onTimeoutTimer()
         QMetaObject::invokeMethod(m_session, [s = m_session, ih] { s->cancelDownloadMetadata(TorrentID::fromString(ih)); }, Qt::QueuedConnection);
         m_inFlight.remove(ih);
         m_queued.remove(ih);
+        m_statMetadataTimeouts.fetch_add(1, std::memory_order_relaxed);
         if (m_store)
         {
             QMetaObject::invokeMethod(m_store, [store = m_store, ih] { store->noteFetchFailure(ih); }, Qt::QueuedConnection);
@@ -754,6 +856,7 @@ void DHTHarvester::onMetadataDownloaded(const TorrentInfo &info)
     m_inFlight.remove(v1);
     m_queued.remove(v1);
     m_done.insert(v1);
+    m_statMetadataOk.fetch_add(1, std::memory_order_relaxed);
 
     HarvestedTorrent torrent;
     torrent.infoHashV1 = v1;
