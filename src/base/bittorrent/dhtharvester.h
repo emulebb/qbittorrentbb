@@ -142,6 +142,10 @@ namespace BitTorrent
         // blocking-queued invocation.
         HarvestStore *store() const;
 
+        // Fill the live-crawl counters of a HarvestStats. Safe to call from any
+        // thread: it only reads lock-free atomics maintained by the worker thread.
+        void fillRuntimeStats(HarvestStats &stats) const;
+
     signals:
         // Emitted (main thread) when a newly discovered torrent's metadata has
         // been fetched and indexed.

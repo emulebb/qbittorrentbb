@@ -90,9 +90,21 @@ namespace BitTorrent
 
     struct HarvestStats
     {
+        // Persistent index counts (from the SQLite store).
         qint64 torrentCount = 0;     // distinct infohashes seen
         qint64 metadataCount = 0;    // infohashes with fetched metadata
         qint64 sightingCount = 0;    // total sighting rows
+
+        // Live crawl counters (from the running harvester; cumulative for this
+        // session unless noted, filled in by DHTHarvester::fillRuntimeStats()).
+        qint64 samplesSent = 0;      // BEP-51 sample_infohashes requests issued
+        qint64 sampleReplies = 0;    // sample_infohashes replies received
+        qint64 announcesSeen = 0;    // announce sightings observed (peer holds it)
+        qint64 metadataOk = 0;       // metadata fetches that succeeded
+        qint64 metadataTimeouts = 0; // metadata fetches that timed out
+        int trackedNodes = 0;        // current BEP-51 frontier size (gauge)
+        int pendingFetch = 0;        // current queued metadata fetches (gauge)
+        int inFlightFetch = 0;       // current in-flight metadata fetches (gauge)
     };
 
     // Active-crawl throughput knobs for the DHT harvester. All INI-tunable via

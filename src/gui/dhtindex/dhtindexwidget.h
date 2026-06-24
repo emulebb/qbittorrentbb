@@ -69,6 +69,7 @@ private:
 
     QCheckBox *m_enableBox = nullptr;
     QLabel *m_statsLabel = nullptr;
+    QLabel *m_crawlStatsLabel = nullptr;
     QLineEdit *m_searchEdit = nullptr;
     QTableWidget *m_table = nullptr;
     QPushButton *m_downloadButton = nullptr;

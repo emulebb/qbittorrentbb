@@ -187,6 +187,11 @@ DHTIndexWidget::DHTIndexWidget(QWidget *parent)
     topRow->addWidget(m_statsLabel);
     layout->addLayout(topRow);
 
+    // Second row: live crawl diagnostics (frontier/sample/fetch counters).
+    m_crawlStatsLabel = new QLabel(this);
+    m_crawlStatsLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(m_crawlStatsLabel);
+
     auto *searchRow = new QHBoxLayout;
     m_searchEdit = new QLineEdit(this);
     m_searchEdit->setPlaceholderText(tr("Search harvested torrents by name..."));
@@ -259,6 +264,14 @@ void DHTIndexWidget::refreshStats()
     m_statsLabel->setText(tr("Infohashes: %1  |  With metadata: %2  |  Sightings: %3")
             .arg(QString::number(stats.torrentCount), QString::number(stats.metadataCount)
                 , QString::number(stats.sightingCount)));
+    // Live crawl diagnostics: lets you tell "slow" from "not crawling at all" at a
+    // glance (no frontier nodes / no samples sent -> DHT not feeding the crawler).
+    m_crawlStatsLabel->setText(tr("Nodes: %1  |  Samples: %2  |  Replies: %3  |  Announces: %4"
+                                  "  |  Fetch: %5 ok / %6 timeout  |  Queue: %7 in-flight, %8 pending")
+            .arg(QString::number(stats.trackedNodes), QString::number(stats.samplesSent)
+                , QString::number(stats.sampleReplies), QString::number(stats.announcesSeen)
+                , QString::number(stats.metadataOk), QString::number(stats.metadataTimeouts)
+                , QString::number(stats.inFlightFetch), QString::number(stats.pendingFetch)));
 
     // Live feed: while no search is active, keep showing the most recent indexed
     // torrents as they come in (capped).

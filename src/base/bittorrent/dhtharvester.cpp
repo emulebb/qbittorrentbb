@@ -329,6 +329,18 @@ HarvestStore *DHTHarvester::store() const
     return m_storeHandle.load(std::memory_order_acquire);
 }
 
+void DHTHarvester::fillRuntimeStats(HarvestStats &stats) const
+{
+    stats.samplesSent = m_statSamplesSent.load(std::memory_order_relaxed);
+    stats.sampleReplies = m_statSampleReplies.load(std::memory_order_relaxed);
+    stats.announcesSeen = m_statAnnounces.load(std::memory_order_relaxed);
+    stats.metadataOk = m_statMetadataOk.load(std::memory_order_relaxed);
+    stats.metadataTimeouts = m_statMetadataTimeouts.load(std::memory_order_relaxed);
+    stats.trackedNodes = m_statTrackedNodes.load(std::memory_order_relaxed);
+    stats.pendingFetch = m_statPending.load(std::memory_order_relaxed);
+    stats.inFlightFetch = m_statInFlight.load(std::memory_order_relaxed);
+}
+
 void DHTHarvester::start()
 {
     if (m_running)

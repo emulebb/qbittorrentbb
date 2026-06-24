@@ -1070,13 +1070,15 @@ HarvestStats SessionImpl::dhtHarvestStats() const
     if (!m_dhtHarvester)
         return {};
 
-    HarvestStore *store = m_dhtHarvester->store();
-    if (!store)
-        return {};
-
     HarvestStats result;
-    QMetaObject::invokeMethod(store, [store] { return store->stats(); }
-        , Qt::BlockingQueuedConnection, &result);
+    // Persistent index counts (store may not exist yet if crawling never started).
+    if (HarvestStore *store = m_dhtHarvester->store())
+    {
+        QMetaObject::invokeMethod(store, [store] { return store->stats(); }
+            , Qt::BlockingQueuedConnection, &result);
+    }
+    // Overlay the live crawl counters (lock-free read of the harvester atomics).
+    m_dhtHarvester->fillRuntimeStats(result);
     return result;
 }
 
