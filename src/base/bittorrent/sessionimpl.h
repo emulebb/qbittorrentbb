@@ -84,6 +84,7 @@ namespace BitTorrent
     class TorrentContentRemover;
     class TorrentDescriptor;
     class TorrentImpl;
+    class TrackerScraper;
     class Tracker;
 
     struct LoadTorrentParams;
@@ -220,9 +221,13 @@ namespace BitTorrent
         void setAutoBanBlockedCountries(const QStringList &countries) override;
         HarvestSearchPage searchDHTIndex(const QString &query, int limit, int offset) const override;
         HarvestSearchPage recentDHTIndex(int limit, int offset) const override;
+        QList<HarvestTypeCount> dhtIndexTypeCounts(const QString &query) const override;
+        HarvestSearchPage searchDHTIndexByType(const QString &query, const QString &contentType, int limit, int offset) const override;
+        HarvestSearchPage recentDHTIndexByType(const QString &contentType, int limit, int offset) const override;
         QByteArray dhtTorrentMetadata(const QString &infoHashV1) const override;
         void connectDHTMetadataPeer(const QString &infoHashV1, const QString &ip, int port) override;
         HarvestStats dhtHarvestStats() const override;
+        void scrapeTrackerFor(const QStringList &infoHashesV1) override;
         bool isAddTorrentToQueueTop() const override;
         void setAddTorrentToQueueTop(bool value) override;
         bool isAddTorrentStopped() const override;
@@ -694,6 +699,7 @@ namespace BitTorrent
         CachedSettingValue<int> m_dhtHarvesterRecurseNodesPerSample;
         CachedSettingValue<int> m_dhtHarvesterMetadataTimeoutAnnounceMs;
         CachedSettingValue<int> m_dhtHarvesterMetadataTimeoutSpeculativeMs;
+        CachedSettingValue<QString> m_dhtHarvesterScrapeTracker;
         CachedSettingValue<bool> m_isAutoBanUnknownPeerEnabled;
         CachedSettingValue<bool> m_isAutoBanBTPlayerPeerEnabled;
         CachedSettingValue<bool> m_isShadowBanEnabled;
@@ -885,6 +891,7 @@ namespace BitTorrent
         QHash<TorrentID, lt::torrent_handle> m_downloadedMetadata;
 
         DHTHarvester *m_dhtHarvester = nullptr;
+        TrackerScraper *m_trackerScraper = nullptr;  // lazily created on first scrape request
 
         QHash<TorrentID, TorrentImpl *> m_torrents;
         QHash<TorrentID, TorrentImpl *> m_hybridTorrentsByAltID;

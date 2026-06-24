@@ -105,6 +105,7 @@
 #include "filesearcher.h"
 #include "filterparserthread.h"
 #include "dhtharvester.h"
+#include "trackerscraper.h"
 #include "loadtorrentparams.h"
 #include "lttypecast.h"
 #include "nativesessionextension.h"
@@ -452,13 +453,17 @@ SessionImpl::SessionImpl(QObject *parent)
     , m_isPeXEnabled(BITTORRENT_SESSION_KEY(u"PeXEnabled"_s), true)
     , m_isDHTHarvesterEnabled(BITTORRENT_SESSION_KEY(u"DHTHarvesterEnabled"_s), false)
     , m_isDHTHarvesterActiveCrawlEnabled(BITTORRENT_SESSION_KEY(u"DHTHarvesterActiveCrawl"_s), true)
-    , m_dhtHarvesterMaxConcurrentMetadata(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxConcurrentMetadata"_s), 24)
+    // Defaults raised ~2x from the original conservative crawl (24/10/24/3): a more
+    // aggressive but still polite background crawl. Live-tunable via the GUI intensity
+    // dial / these INI keys; existing INIs keep their stored values.
+    , m_dhtHarvesterMaxConcurrentMetadata(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxConcurrentMetadata"_s), 48)
     , m_dhtHarvesterSampleIntervalMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterSampleIntervalMs"_s), 4000)
-    , m_dhtHarvesterMaxSampleNodesPerTick(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxSampleNodesPerTick"_s), 10)
-    , m_dhtHarvesterSampleBudgetPerTick(BITTORRENT_SESSION_KEY(u"DHTHarvesterSampleBudgetPerTick"_s), 24)
-    , m_dhtHarvesterRecurseNodesPerSample(BITTORRENT_SESSION_KEY(u"DHTHarvesterRecurseNodesPerSample"_s), 3)
+    , m_dhtHarvesterMaxSampleNodesPerTick(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxSampleNodesPerTick"_s), 20)
+    , m_dhtHarvesterSampleBudgetPerTick(BITTORRENT_SESSION_KEY(u"DHTHarvesterSampleBudgetPerTick"_s), 48)
+    , m_dhtHarvesterRecurseNodesPerSample(BITTORRENT_SESSION_KEY(u"DHTHarvesterRecurseNodesPerSample"_s), 4)
     , m_dhtHarvesterMetadataTimeoutAnnounceMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterMetadataTimeoutAnnounceMs"_s), 8000)
     , m_dhtHarvesterMetadataTimeoutSpeculativeMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterMetadataTimeoutSpeculativeMs"_s), 3000)
+    , m_dhtHarvesterScrapeTracker(BITTORRENT_SESSION_KEY(u"DHTHarvesterScrapeTracker"_s), u"udp://tracker.opentrackr.org:1337/announce"_s)
     , m_isAutoBanUnknownPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanUnknownPeer"_s), false)
     , m_isAutoBanBTPlayerPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanBTPlayerPeer"_s), false)
     , m_isShadowBanEnabled(BITTORRENT_SESSION_KEY(u"ShadowBan"_s), false)
@@ -1024,6 +1029,51 @@ HarvestSearchPage SessionImpl::recentDHTIndex(const int limit, const int offset)
     return page;
 }
 
+QList<HarvestTypeCount> SessionImpl::dhtIndexTypeCounts(const QString &query) const
+{
+    if (!m_dhtHarvester)
+        return {};
+
+    HarvestStore *store = m_dhtHarvester->store();
+    if (!store)
+        return {};
+
+    QList<HarvestTypeCount> counts;
+    QMetaObject::invokeMethod(store, [store, query] { return store->typeCounts(query); }
+        , Qt::BlockingQueuedConnection, &counts);
+    return counts;
+}
+
+HarvestSearchPage SessionImpl::searchDHTIndexByType(const QString &query, const QString &contentType, const int limit, const int offset) const
+{
+    if (!m_dhtHarvester)
+        return {};
+
+    HarvestStore *store = m_dhtHarvester->store();
+    if (!store)
+        return {};
+
+    HarvestSearchPage page;
+    QMetaObject::invokeMethod(store, [store, query, contentType, limit, offset] { return store->searchByType(query, contentType, limit, offset); }
+        , Qt::BlockingQueuedConnection, &page);
+    return page;
+}
+
+HarvestSearchPage SessionImpl::recentDHTIndexByType(const QString &contentType, const int limit, const int offset) const
+{
+    if (!m_dhtHarvester)
+        return {};
+
+    HarvestStore *store = m_dhtHarvester->store();
+    if (!store)
+        return {};
+
+    HarvestSearchPage page;
+    QMetaObject::invokeMethod(store, [store, contentType, limit, offset] { return store->recentByType(contentType, limit, offset); }
+        , Qt::BlockingQueuedConnection, &page);
+    return page;
+}
+
 QByteArray SessionImpl::dhtTorrentMetadata(const QString &infoHashV1) const
 {
     if (!m_dhtHarvester)
@@ -1083,6 +1133,42 @@ HarvestStats SessionImpl::dhtHarvestStats() const
     // Overlay the live crawl counters (lock-free read of the harvester atomics).
     m_dhtHarvester->fillRuntimeStats(result);
     return result;
+}
+
+void SessionImpl::scrapeTrackerFor(const QStringList &infoHashesV1)
+{
+    if (infoHashesV1.isEmpty())
+        return;
+
+    const QString trackerUrl = m_dhtHarvesterScrapeTracker;
+    if (trackerUrl.isEmpty())
+        return;  // scrape feature disabled (no tracker configured)
+
+    if (!m_trackerScraper)
+    {
+        m_trackerScraper = new TrackerScraper(this);
+        connect(m_trackerScraper, &TrackerScraper::scraped, this
+                , [this](const QString &infoHashV1, const int seeds, const int leechers)
+        {
+            // Persist into the index (the store lives on its own worker thread) ...
+            if (m_dhtHarvester)
+            {
+                if (HarvestStore *store = m_dhtHarvester->store())
+                {
+                    QMetaObject::invokeMethod(store, [store, infoHashV1, seeds, leechers]
+                        { store->updateTrackerScrape(infoHashV1, seeds, leechers); }, Qt::QueuedConnection);
+                }
+            }
+            // ... and notify the GUI so it can live-update the visible rows.
+            emit dhtTrackerScrapeUpdated(infoHashV1, seeds, leechers);
+        });
+    }
+
+    // Keep the scraper pointed at the current tracker and bound to the (tunnel) egress
+    // address, exactly like the rest of the BT data plane.
+    m_trackerScraper->setTracker(trackerUrl);
+    m_trackerScraper->setBindAddress(networkInterfaceAddress());
+    m_trackerScraper->scrape(infoHashesV1);
 }
 
 bool SessionImpl::isDownloadPathEnabled() const

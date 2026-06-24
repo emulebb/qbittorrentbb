@@ -246,9 +246,18 @@ namespace BitTorrent
         virtual void setAutoBanBlockedCountries(const QStringList &countries) = 0;
         virtual HarvestSearchPage searchDHTIndex(const QString &query, int limit, int offset) const = 0;
         virtual HarvestSearchPage recentDHTIndex(int limit, int offset) const = 0;
+        // Grouped-tree variants: per-content-type counts plus windowed reads scoped to
+        // a single content type (drive the lazily loaded tree on the DHT Index tab).
+        virtual QList<HarvestTypeCount> dhtIndexTypeCounts(const QString &query) const = 0;
+        virtual HarvestSearchPage searchDHTIndexByType(const QString &query, const QString &contentType, int limit, int offset) const = 0;
+        virtual HarvestSearchPage recentDHTIndexByType(const QString &contentType, int limit, int offset) const = 0;
         virtual QByteArray dhtTorrentMetadata(const QString &infoHashV1) const = 0;
         virtual void connectDHTMetadataPeer(const QString &infoHashV1, const QString &ip, int port) = 0;
         virtual HarvestStats dhtHarvestStats() const = 0;
+        // Best-effort BEP-15 scrape of the given infohashes against the one configured
+        // tracker; results arrive asynchronously via dhtTrackerScrapeUpdated() and are
+        // persisted into the index.
+        virtual void scrapeTrackerFor(const QStringList &infoHashesV1) = 0;
         virtual bool isAddTorrentToQueueTop() const = 0;
         virtual void setAddTorrentToQueueTop(bool value) = 0;
         virtual bool isAddTorrentStopped() const = 0;
@@ -529,6 +538,7 @@ namespace BitTorrent
         void IPFilterParsed(bool error, int ruleCount);
         void metadataDownloaded(const TorrentInfo &info);
         void dhtTorrentIndexed(const QString &infoHashV1, const QString &name);
+        void dhtTrackerScrapeUpdated(const QString &infoHashV1, int seeds, int leechers);
         void restored();
         void paused();
         void resumed();
