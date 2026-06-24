@@ -2,10 +2,10 @@
   "schemaVersion": "emulebb-fork-delta/v1",
   "upstream": {
     "remote": "upstream",
-    "branch": "release-5.2.1",
+    "branch": "release-5.2.2",
     "url": "https://github.com/qbittorrent/qBittorrent.git",
-    "baseCommit": "7e8db603f",
-    "baseVersion": "5.2.1"
+    "baseCommit": "89aad1aad",
+    "baseVersion": "5.2.2"
   },
   "fork": {
     "remote": "origin",
