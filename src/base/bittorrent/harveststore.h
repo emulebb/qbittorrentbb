@@ -116,7 +116,11 @@ namespace BitTorrent
         int maxSampleNodesPerTick = 10;    // live-nodes sampled per tick
         int sampleBudgetPerTick = 24;      // max outstanding sample requests per tick
         int recurseNodesPerSample = 3;     // returned nodes recursed into per sample reply
-        int metadataTimeoutMs = 10000;     // how long a metadata fetch holds a slot
+        // Metadata-fetch slot timeouts, tiered by discovery source: a peer seen
+        // *holding* the torrent (announce) gets a longer leash; a speculative
+        // get_peers/sample sighting (most have no holder) is dropped quickly.
+        int metadataTimeoutAnnounceMs = 8000;
+        int metadataTimeoutSpeculativeMs = 3000;
     };
 
     struct HarvestPruneStats

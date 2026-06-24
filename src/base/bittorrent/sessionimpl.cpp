@@ -457,7 +457,8 @@ SessionImpl::SessionImpl(QObject *parent)
     , m_dhtHarvesterMaxSampleNodesPerTick(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxSampleNodesPerTick"_s), 10)
     , m_dhtHarvesterSampleBudgetPerTick(BITTORRENT_SESSION_KEY(u"DHTHarvesterSampleBudgetPerTick"_s), 24)
     , m_dhtHarvesterRecurseNodesPerSample(BITTORRENT_SESSION_KEY(u"DHTHarvesterRecurseNodesPerSample"_s), 3)
-    , m_dhtHarvesterMetadataTimeoutMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterMetadataTimeoutMs"_s), 10000)
+    , m_dhtHarvesterMetadataTimeoutAnnounceMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterMetadataTimeoutAnnounceMs"_s), 8000)
+    , m_dhtHarvesterMetadataTimeoutSpeculativeMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterMetadataTimeoutSpeculativeMs"_s), 3000)
     , m_isAutoBanUnknownPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanUnknownPeer"_s), false)
     , m_isAutoBanBTPlayerPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanBTPlayerPeer"_s), false)
     , m_isShadowBanEnabled(BITTORRENT_SESSION_KEY(u"ShadowBan"_s), false)
@@ -893,7 +894,8 @@ HarvesterTuning SessionImpl::dhtHarvesterTuning() const
     tuning.maxSampleNodesPerTick = m_dhtHarvesterMaxSampleNodesPerTick;
     tuning.sampleBudgetPerTick = m_dhtHarvesterSampleBudgetPerTick;
     tuning.recurseNodesPerSample = m_dhtHarvesterRecurseNodesPerSample;
-    tuning.metadataTimeoutMs = m_dhtHarvesterMetadataTimeoutMs;
+    tuning.metadataTimeoutAnnounceMs = m_dhtHarvesterMetadataTimeoutAnnounceMs;
+    tuning.metadataTimeoutSpeculativeMs = m_dhtHarvesterMetadataTimeoutSpeculativeMs;
     return tuning;
 }
 
@@ -903,7 +905,8 @@ void SessionImpl::setDHTHarvesterTuning(const HarvesterTuning &tuning)
     m_dhtHarvesterMaxSampleNodesPerTick = tuning.maxSampleNodesPerTick;
     m_dhtHarvesterSampleBudgetPerTick = tuning.sampleBudgetPerTick;
     m_dhtHarvesterRecurseNodesPerSample = tuning.recurseNodesPerSample;
-    m_dhtHarvesterMetadataTimeoutMs = tuning.metadataTimeoutMs;
+    m_dhtHarvesterMetadataTimeoutAnnounceMs = tuning.metadataTimeoutAnnounceMs;
+    m_dhtHarvesterMetadataTimeoutSpeculativeMs = tuning.metadataTimeoutSpeculativeMs;
     if (m_dhtHarvester)
         m_dhtHarvester->setTuning(tuning);
 }

@@ -692,7 +692,8 @@ namespace BitTorrent
         CachedSettingValue<int> m_dhtHarvesterMaxSampleNodesPerTick;
         CachedSettingValue<int> m_dhtHarvesterSampleBudgetPerTick;
         CachedSettingValue<int> m_dhtHarvesterRecurseNodesPerSample;
-        CachedSettingValue<int> m_dhtHarvesterMetadataTimeoutMs;
+        CachedSettingValue<int> m_dhtHarvesterMetadataTimeoutAnnounceMs;
+        CachedSettingValue<int> m_dhtHarvesterMetadataTimeoutSpeculativeMs;
         CachedSettingValue<bool> m_isAutoBanUnknownPeerEnabled;
         CachedSettingValue<bool> m_isAutoBanBTPlayerPeerEnabled;
         CachedSettingValue<bool> m_isShadowBanEnabled;

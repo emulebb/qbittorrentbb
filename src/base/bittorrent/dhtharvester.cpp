@@ -69,8 +69,11 @@ namespace
     // Metadata-fetch timeout housekeeping. Most DHT-sniffed infohashes have no
     // reachable peer (get_peers = someone *asking*, not *having*), so they hold a
     // fetch slot until timeout; a peer that does have it exchanges the small
-    // info-dict within seconds, so a shorter timeout mainly frees dead slots.
-    const int TIMEOUT_SWEEP_MS = 5000;
+    // info-dict within seconds. The per-fetch deadline is tiered by source (see
+    // HarvesterTuning); the sweep runs at a fine 1s granularity so short
+    // speculative timeouts free dead slots promptly. Scanning m_inFlight
+    // (<= m_maxConcurrent entries) every second is negligible.
+    const int TIMEOUT_SWEEP_MS = 1000;
 
     // Metadata scheduler: periodically top up the fetch queue from the PERSISTENT
     // store (infohashes still lacking metadata, most promising first by
@@ -292,7 +295,8 @@ void DHTHarvester::setTuning(const HarvesterTuning &tuning)
     m_maxSampleNodesPerTick = std::clamp(tuning.maxSampleNodesPerTick, 1, 200);
     m_sampleBudgetPerTick = std::clamp(tuning.sampleBudgetPerTick, 1, 1000);
     m_recurseNodesPerSample = std::clamp(tuning.recurseNodesPerSample, 0, 50);
-    m_metadataTimeoutMs = std::clamp(tuning.metadataTimeoutMs, 2000, 5 * 60 * 1000);
+    m_metadataTimeoutAnnounceMs = std::clamp(tuning.metadataTimeoutAnnounceMs, 1000, 5 * 60 * 1000);
+    m_metadataTimeoutSpeculativeMs = std::clamp(tuning.metadataTimeoutSpeculativeMs, 1000, 5 * 60 * 1000);
 
     // Apply the cadence live; the timer may not exist yet (latched pre-start).
     if (m_sampleTimer)
@@ -480,12 +484,16 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
         {
             m_statAnnounces.fetch_add(1, std::memory_order_relaxed);
             postSighting(event.infoHashHex, u"announce"_s, event.ip, event.port);
-            enqueue(event.infoHashHex);  // a peer HAS it -> fetch immediately
+            enqueue(event.infoHashHex, /*fromAnnounce*/ true);  // a peer HAS it -> fetch immediately
             // The announcing peer holds the torrent: feed it straight to the
             // in-flight metadata download instead of re-finding peers via DHT.
             // connectDHTMetadataPeer touches GUI-thread Session state, so marshal it.
-            if (m_inFlight.contains(event.infoHashHex))
+            if (const auto it = m_inFlight.find(event.infoHashHex); it != m_inFlight.end())
             {
+                // A real announcer arrived for an in-flight (possibly speculative)
+                // fetch: extend its deadline to the announce tier so it isn't cut
+                // short, and hand the peer to the download.
+                it.value() = std::max(it.value(), nowMs() + m_metadataTimeoutAnnounceMs);
                 const QString ih = event.infoHashHex;
                 const QString ip = event.ip;
                 const int port = event.port;
@@ -693,7 +701,7 @@ void DHTHarvester::onTimeoutTimer()
     QStringList timedOut;
     for (auto it = m_inFlight.cbegin(); it != m_inFlight.cend(); ++it)
     {
-        if ((now - it.value()) > m_metadataTimeoutMs)
+        if (now > it.value())  // value is the source-tiered deadline
             timedOut.append(it.key());
     }
 
@@ -713,7 +721,7 @@ void DHTHarvester::onTimeoutTimer()
     requestPump();
 }
 
-void DHTHarvester::enqueue(const QString &infoHashV1)
+void DHTHarvester::enqueue(const QString &infoHashV1, const bool fromAnnounce)
 {
     if (infoHashV1.isEmpty() || m_done.contains(infoHashV1) || m_queued.contains(infoHashV1))
         return;
@@ -725,7 +733,7 @@ void DHTHarvester::enqueue(const QString &infoHashV1)
         return;
 
     m_queued.insert(infoHashV1);
-    m_pending.enqueue(infoHashV1);
+    m_pending.enqueue({infoHashV1, fromAnnounce});
     requestPump();
 }
 
@@ -754,8 +762,10 @@ void DHTHarvester::onScheduleTimer()
 void DHTHarvester::onCandidates(const QList<QString> &candidates)
 {
     m_candidateRequestInFlight = false;
+    // Store-driven candidates come from the persistent index (get_peers/sample
+    // sightings); treat them as speculative (short timeout tier).
     for (const QString &ih : candidates)
-        enqueue(ih);
+        enqueue(ih, /*fromAnnounce*/ false);
 }
 
 void DHTHarvester::onPruneTimer()
@@ -795,7 +805,8 @@ void DHTHarvester::pump()
 
     while ((m_inFlight.size() < m_maxConcurrent) && !m_pending.isEmpty())
     {
-        const QString ih = m_pending.dequeue();
+        const PendingFetch fetch = m_pending.dequeue();
+        const QString ih = fetch.infoHash;
         if (m_done.contains(ih) || m_inFlight.contains(ih))
         {
             m_queued.remove(ih);
@@ -812,10 +823,11 @@ void DHTHarvester::pump()
             continue;
         }
 
-        // Claim the slot optimistically, then start the (GUI-thread-affine) metadata
-        // download on the Session thread. If it declines (already known/fetching),
-        // it posts back onDownloadRejected() to release the claim.
-        m_inFlight.insert(ih, nowMs());
+        // Claim the slot optimistically with a source-tiered deadline, then start
+        // the (GUI-thread-affine) metadata download on the Session thread. If it
+        // declines (already known/fetching), it posts back onDownloadRejected().
+        const int timeoutMs = fetch.fromAnnounce ? m_metadataTimeoutAnnounceMs : m_metadataTimeoutSpeculativeMs;
+        m_inFlight.insert(ih, nowMs() + timeoutMs);
         QMetaObject::invokeMethod(m_session, [this, s = m_session, d = descr.value(), ih]
         {
             if (!s->downloadMetadata(d))

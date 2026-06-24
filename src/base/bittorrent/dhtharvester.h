@@ -166,7 +166,7 @@ namespace BitTorrent
     private:
         void start();
         void stop();
-        void enqueue(const QString &infoHashV1);
+        void enqueue(const QString &infoHashV1, bool fromAnnounce);
         void pump();
         void requestPump();       // coalesce pump() to at most once per event-loop turn
         void postSighting(const QString &infoHashV1, const QString &source, const QString &ip, int port);
@@ -200,7 +200,10 @@ namespace BitTorrent
         int m_maxSampleNodesPerTick = 10;
         int m_sampleBudgetPerTick = 24;
         int m_recurseNodesPerSample = 3;
-        int m_metadataTimeoutMs = 10000;
+        // Tiered metadata-fetch timeouts (ms): announce-sourced fetches (a peer
+        // holds it) get a longer leash than speculative get_peers/sample ones.
+        int m_metadataTimeoutAnnounceMs = 8000;
+        int m_metadataTimeoutSpeculativeMs = 3000;
         bool m_running = false;
         bool m_warnedNoVPN = false;
         bool m_pumpScheduled = false;            // a coalesced pump() is already queued
@@ -208,9 +211,16 @@ namespace BitTorrent
         QString m_boundIfaceConfigName;     // snapshot of Session::networkInterface()
         QString m_boundIfaceHumanName;      // snapshot of Session::networkInterfaceName()
 
-        QQueue<QString> m_pending;
+        // A queued metadata fetch plus the discovery source that sets its timeout
+        // tier; the source must survive in the queue until pump() claims a slot.
+        struct PendingFetch
+        {
+            QString infoHash;
+            bool fromAnnounce = false;
+        };
+        QQueue<PendingFetch> m_pending;
         QSet<QString> m_queued;             // in m_pending or m_inFlight (dedupe)
-        QHash<QString, qint64> m_inFlight;  // infoHashV1 -> fetch start (ms)
+        QHash<QString, qint64> m_inFlight;  // infoHashV1 -> fetch deadline (ms, source-tiered)
         QSet<QString> m_done;               // fetched this session
         QList<HarvestSighting> m_sightingBuffer;
 
