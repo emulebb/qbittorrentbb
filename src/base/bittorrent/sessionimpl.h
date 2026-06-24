@@ -629,6 +629,9 @@ namespace BitTorrent
         void handleSocks5Alert(const lt::socks5_alert *alert) const;
         void handleI2PAlert(const lt::i2p_alert *alert) const;
         void handleTrackerAlert(const lt::tracker_alert *alert);
+        // Reduce a (short-lived) DHT alert to a thread-safe HarvestAlertEvent on the
+        // GUI thread and post it to the harvester's worker thread.
+        void dispatchHarvesterAlert(const lt::alert *alert);
 #ifdef QBT_USES_LIBTORRENT2
         void handleTorrentConflictAlert(const lt::torrent_conflict_alert *alert);
         void handleFilePrioAlert(const lt::file_prio_alert *alert);

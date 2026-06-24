@@ -30,10 +30,13 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 
+#include <libtorrent/address.hpp>
 #include <libtorrent/alert_types.hpp>
 #include <libtorrent/session.hpp>
 #include <libtorrent/sha1_hash.hpp>
+#include <libtorrent/socket.hpp>
 
 #include <QDateTime>
 #include <QNetworkInterface>
@@ -55,13 +58,15 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace
 {
-    // BEP-51 active-crawl cadence and per-tick fan-out.
-    const int SAMPLE_INTERVAL_MS = 8000;
-    const int MAX_SAMPLE_NODES_PER_TICK = 6;
+    // BEP-51 active-crawl cadence and per-tick fan-out. Kept deliberately gentle:
+    // the harvester is a low-priority background indexer, so we trade crawl speed
+    // for a light, steady load that never disturbs the GUI.
+    const int SAMPLE_INTERVAL_MS = 12000;
+    const int MAX_SAMPLE_NODES_PER_TICK = 4;
     // Bounded keyspace traversal: how many sample requests may be outstanding per
     // tick (caps recursion) and how many returned nodes to recurse into per reply.
-    const int SAMPLE_BUDGET_PER_TICK = 18;
-    const int RECURSE_NODES_PER_SAMPLE = 2;
+    const int SAMPLE_BUDGET_PER_TICK = 8;
+    const int RECURSE_NODES_PER_SAMPLE = 1;
 
     // Metadata-fetch timeout housekeeping. Most DHT-sniffed infohashes have no
     // reachable peer (get_peers = someone *asking*, not *having*), so they hold a
@@ -78,7 +83,7 @@ namespace
     // discovery firehose never grows memory; the store re-supplies as slots free.
     const int SCHEDULE_INTERVAL_MS = 3000;
     const int MAX_PENDING = 2000;
-    const int MAX_CONCURRENT_METADATA = 40;
+    const int MAX_CONCURRENT_METADATA = 16;
     const int SIGHTING_FLUSH_INTERVAL_MS = 1000;
     const int MAX_SIGHTING_BUFFER = 500;
 
@@ -110,6 +115,16 @@ namespace
     {
         return SHA1Hash(hash).toString();
     }
+
+    // Rebuild a UDP endpoint from the (ip-string, port) carried in a HarvestAlertEvent.
+    std::optional<lt::udp::endpoint> toEndpoint(const QString &ip, const quint16 port)
+    {
+        lt::error_code ec;
+        const lt::address addr = lt::make_address(ip.toLatin1().constData(), ec);
+        if (ec)
+            return std::nullopt;
+        return lt::udp::endpoint(addr, port);
+    }
 }
 
 using namespace BitTorrent;
@@ -119,12 +134,85 @@ DHTHarvester::DHTHarvester(Session *session, lt::session *nativeSession, const P
     , m_session {session}
     , m_nativeSession {nativeSession}
     , m_path {dbPath}
-    , m_sampleTimer {new QTimer(this)}
-    , m_timeoutTimer {new QTimer(this)}
-    , m_scheduleTimer {new QTimer(this)}
-    , m_pruneTimer {new QTimer(this)}
-    , m_sightingFlushTimer {new QTimer(this)}
 {
+    // Timers are NOT created here: they must have affinity to the worker thread,
+    // so onThreadStarted() (which runs on that thread) creates them. The metadata
+    // signal is connected now; once we moveToThread() it auto-degrades to a queued
+    // cross-thread delivery (TorrentInfo is a registered metatype).
+    connect(m_session, &Session::metadataDownloaded, this, &DHTHarvester::onMetadataDownloaded);
+}
+
+DHTHarvester::~DHTHarvester()
+{
+    // By now shutdown() has stopped the worker thread; stop() here is an idempotent
+    // safety net. Tear down the persistent store (kept alive across enable/disable)
+    // and the worker thread object.
+    if (m_thread && m_thread->isRunning())
+    {
+        m_thread->quit();
+        m_thread->wait();
+    }
+    stop();
+
+    if (m_storeThread)
+    {
+        // No GUI store() reader can run concurrently here (~DHTHarvester runs on the
+        // GUI thread, as do the store() callers), so unpublishing is just tidiness.
+        m_storeHandle.store(nullptr, std::memory_order_release);
+        if (m_store)
+        {
+            // Delete the store on its own thread so its SQLite connection is removed
+            // from the thread that created it.
+            QMetaObject::invokeMethod(m_store, [store = m_store] { delete store; }, Qt::BlockingQueuedConnection);
+            m_store = nullptr;
+        }
+        m_storeThread->quit();
+        m_storeThread->wait();
+        delete m_storeThread;
+        m_storeThread = nullptr;
+    }
+
+    delete m_thread;
+    m_thread = nullptr;
+}
+
+void DHTHarvester::shutdown()
+{
+    if (!m_thread)
+    {
+        stop();
+        return;
+    }
+    // Drain the crawl loop on the worker thread, then quit it. stop() posts in-flight
+    // metadata cancellations to the Session (queued); the caller is responsible for
+    // letting the Session process them before it is destroyed.
+    QMetaObject::invokeMethod(this, &DHTHarvester::stop, Qt::BlockingQueuedConnection);
+    m_thread->quit();
+    m_thread->wait();
+}
+
+void DHTHarvester::startWorker()
+{
+    if (m_thread)
+        return;
+
+    m_thread = new QThread;
+    m_thread->setObjectName(u"DHTHarvester"_s);
+    moveToThread(m_thread);
+    connect(m_thread, &QThread::started, this, &DHTHarvester::onThreadStarted);
+    // Low priority so the harvester always yields to foreground GUI work.
+    m_thread->start(QThread::LowPriority);
+}
+
+void DHTHarvester::onThreadStarted()
+{
+    // Runs on the worker thread: create the timers here so every timeout fires on
+    // this thread, then apply whatever configuration was latched before start.
+    m_sampleTimer = new QTimer(this);
+    m_timeoutTimer = new QTimer(this);
+    m_scheduleTimer = new QTimer(this);
+    m_pruneTimer = new QTimer(this);
+    m_sightingFlushTimer = new QTimer(this);
     m_sampleTimer->setInterval(SAMPLE_INTERVAL_MS);
     m_timeoutTimer->setInterval(TIMEOUT_SWEEP_MS);
     m_scheduleTimer->setInterval(SCHEDULE_INTERVAL_MS);
@@ -135,12 +223,10 @@ DHTHarvester::DHTHarvester(Session *session, lt::session *nativeSession, const P
     connect(m_scheduleTimer, &QTimer::timeout, this, &DHTHarvester::onScheduleTimer);
     connect(m_pruneTimer, &QTimer::timeout, this, &DHTHarvester::onPruneTimer);
     connect(m_sightingFlushTimer, &QTimer::timeout, this, &DHTHarvester::flushSightings);
-    connect(m_session, &Session::metadataDownloaded, this, &DHTHarvester::onMetadataDownloaded);
-}
 
-DHTHarvester::~DHTHarvester()
-{
-    stop();
+    m_workerStarted = true;
+    if (m_enabled)
+        start();
 }
 
 bool DHTHarvester::isEnabled() const
@@ -150,10 +236,19 @@ bool DHTHarvester::isEnabled() const
 
 void DHTHarvester::setEnabled(const bool enabled)
 {
+    if (m_workerStarted && (QThread::currentThread() != thread()))
+    {
+        QMetaObject::invokeMethod(this, [this, enabled] { setEnabled(enabled); }, Qt::QueuedConnection);
+        return;
+    }
+
     if (m_enabled == enabled)
         return;
-
     m_enabled = enabled;
+
+    if (!m_workerStarted)
+        return;  // latched; onThreadStarted() will start() if still enabled
+
     if (m_enabled)
         start();
     else
@@ -162,17 +257,52 @@ void DHTHarvester::setEnabled(const bool enabled)
 
 void DHTHarvester::setActiveCrawlEnabled(const bool enabled)
 {
+    if (m_workerStarted && (QThread::currentThread() != thread()))
+    {
+        QMetaObject::invokeMethod(this, [this, enabled] { setActiveCrawlEnabled(enabled); }, Qt::QueuedConnection);
+        return;
+    }
     m_activeCrawl = enabled;
 }
 
 void DHTHarvester::setMaxConcurrentMetadata(const int max)
 {
+    if (m_workerStarted && (QThread::currentThread() != thread()))
+    {
+        QMetaObject::invokeMethod(this, [this, max] { setMaxConcurrentMetadata(max); }, Qt::QueuedConnection);
+        return;
+    }
     m_maxConcurrent = std::clamp(max, 1, MAX_CONCURRENT_METADATA);
+}
+
+void DHTHarvester::setBoundInterface(const QString &configName, const QString &humanName)
+{
+    if (m_workerStarted && (QThread::currentThread() != thread()))
+    {
+        QMetaObject::invokeMethod(this, [this, configName, humanName] { setBoundInterface(configName, humanName); }, Qt::QueuedConnection);
+        return;
+    }
+    m_boundIfaceConfigName = configName;
+    m_boundIfaceHumanName = humanName;
+}
+
+void DHTHarvester::setSessionRestored(const bool restored)
+{
+    if (m_workerStarted && (QThread::currentThread() != thread()))
+    {
+        QMetaObject::invokeMethod(this, [this, restored] { setSessionRestored(restored); }, Qt::QueuedConnection);
+        return;
+    }
+    m_sessionRestored = restored;
+    if (m_sessionRestored)
+        requestPump();  // drain anything discovered during startup
 }
 
 HarvestStore *DHTHarvester::store() const
 {
-    return m_store;
+    // Called from the GUI thread; read the race-free published handle (the worker
+    // thread creates the store and publishes it here exactly once).
+    return m_storeHandle.load(std::memory_order_acquire);
 }
 
 void DHTHarvester::start()
@@ -196,12 +326,20 @@ void DHTHarvester::start()
 
     m_warnedNoVPN = false;
 
-    m_storeThread = new QThread;
-    m_storeThread->setObjectName(u"DHTHarvestStore"_s);
-    m_store = new HarvestStore(m_path);
-    m_store->moveToThread(m_storeThread);
-    connect(m_storeThread, &QThread::started, m_store, &HarvestStore::init);
-    m_storeThread->start();
+    // The persistent index lives for the harvester's whole life once created, so it
+    // stays queryable even while crawling is paused and GUI store() readers never
+    // race a teardown. Create it on first start only.
+    if (!m_storeThread)
+    {
+        m_storeThread = new QThread;
+        m_storeThread->setObjectName(u"DHTHarvestStore"_s);
+        auto *store = new HarvestStore(m_path);
+        connect(m_storeThread, &QThread::started, store, &HarvestStore::init);
+        store->moveToThread(m_storeThread);
+        m_storeThread->start();
+        m_store = store;  // worker-thread handle
+        m_storeHandle.store(store, std::memory_order_release);  // publish to store()
+    }
 
     m_sampleTimer->start();
     m_timeoutTimer->start();
@@ -210,48 +348,54 @@ void DHTHarvester::start()
     m_sightingFlushTimer->start();
     m_running = true;
 
-    LogMsg(tr("DHT harvester started (egress bound to interface \"%1\").").arg(m_session->networkInterfaceName()), Log::INFO);
+    LogMsg(tr("DHT harvester started (egress bound to interface \"%1\").").arg(m_boundIfaceHumanName), Log::INFO);
 }
 
 void DHTHarvester::stop()
 {
-    m_sampleTimer->stop();
-    m_timeoutTimer->stop();
-    m_scheduleTimer->stop();
-    m_pruneTimer->stop();
-    m_sightingFlushTimer->stop();
+    // Timers may be null if the worker thread never started (e.g. ~DHTHarvester
+    // before startWorker(), or a second idempotent stop()).
+    if (m_sampleTimer)
+        m_sampleTimer->stop();
+    if (m_timeoutTimer)
+        m_timeoutTimer->stop();
+    if (m_scheduleTimer)
+        m_scheduleTimer->stop();
+    if (m_pruneTimer)
+        m_pruneTimer->stop();
+    if (m_sightingFlushTimer)
+        m_sightingFlushTimer->stop();
 
     flushSightings();
 
+    // Cancelling an ephemeral metadata download touches GUI-thread Session state, so
+    // marshal it. The posted calls target the Session object; SessionImpl drains them
+    // on the GUI thread (on shutdown, ~SessionImpl flushes them before tear-down).
     for (auto it = m_inFlight.cbegin(); it != m_inFlight.cend(); ++it)
-        m_session->cancelDownloadMetadata(TorrentID::fromString(it.key()));
+    {
+        const QString ih = it.key();
+        QMetaObject::invokeMethod(m_session, [s = m_session, ih] { s->cancelDownloadMetadata(TorrentID::fromString(ih)); }, Qt::QueuedConnection);
+    }
     m_inFlight.clear();
     m_pending.clear();
     m_queued.clear();
     m_done.clear();
     m_sightingBuffer.clear();
+    m_candidateRequestInFlight = false;
 
-    if (m_storeThread)
-    {
-        if (m_store)
-        {
-            // Delete the store on its own thread so its SQLite connection is
-            // removed from the thread that created it.
-            QMetaObject::invokeMethod(m_store, [store = m_store] { delete store; }, Qt::BlockingQueuedConnection);
-            m_store = nullptr;
-        }
-        m_storeThread->quit();
-        m_storeThread->wait();
-        delete m_storeThread;
-        m_storeThread = nullptr;
-    }
+    // The store (persistent SQLite index) is intentionally NOT torn down here: it
+    // outlives crawl pause/resume so the index stays queryable and GUI store()
+    // readers never race a deletion. It is destroyed only in ~DHTHarvester.
 
     m_running = false;
 }
 
 bool DHTHarvester::vpnReady() const
 {
-    const QString cfgName = m_session->networkInterface();
+    // Reads only harvester-local snapshots (refreshed from the GUI thread via
+    // setBoundInterface) plus the thread-safe QNetworkInterface enumeration, so it
+    // is safe to call from the worker thread.
+    const QString cfgName = m_boundIfaceConfigName;
     if (cfgName.isEmpty())
     {
         // No in-app interface bind: egress routing is delegated to an external
@@ -260,7 +404,7 @@ bool DHTHarvester::vpnReady() const
         return true;
     }
 
-    const QString humanName = m_session->networkInterfaceName();
+    const QString humanName = m_boundIfaceHumanName;
     const QList<QNetworkInterface> interfaces = QNetworkInterface::allInterfaces();
     for (const QNetworkInterface &iface : interfaces)
     {
@@ -276,113 +420,108 @@ bool DHTHarvester::vpnReady() const
     return false;  // bound interface not present/up -> fail closed
 }
 
-void DHTHarvester::handleAlert(const lt::alert *alert)
+void DHTHarvester::postAlertEvent(const HarvestAlertEvent &event)
+{
+    // Called by SessionImpl on the GUI thread with a value-typed snapshot of a DHT
+    // alert; hand it to the worker thread, where all crawl logic runs.
+    QMetaObject::invokeMethod(this, [this, event] { onAlertEvent(event); }, Qt::QueuedConnection);
+}
+
+void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
 {
     if (!m_enabled || !m_running)
         return;
 
-    switch (alert->type())
+    switch (event.type)
     {
-    case lt::dht_get_peers_alert::alert_type:
-        {
-            const auto *a = static_cast<const lt::dht_get_peers_alert *>(alert);
-            const QString ih = hexOf(a->info_hash);
-            // Record the sighting; the store-driven scheduler picks it up by
-            // availability/recency on the next tick (no in-memory popularity gate).
-            postSighting(ih, u"get_peers"_s, {}, 0);
-        }
+    case HarvestAlertEvent::Type::GetPeers:
+        // Record the sighting; the store-driven scheduler picks it up by
+        // availability/recency on the next tick (no in-memory popularity gate).
+        postSighting(event.infoHashHex, u"get_peers"_s, {}, 0);
         break;
-    case lt::dht_announce_alert::alert_type:
+    case HarvestAlertEvent::Type::Announce:
         {
-            const auto *a = static_cast<const lt::dht_announce_alert *>(alert);
-            const QString ih = hexOf(a->info_hash);
-            const QString peerIP = QString::fromStdString(a->ip.to_string());
-            postSighting(ih, u"announce"_s, peerIP, a->port);
-            enqueue(ih);  // a peer HAS it -> fetch immediately
+            postSighting(event.infoHashHex, u"announce"_s, event.ip, event.port);
+            enqueue(event.infoHashHex);  // a peer HAS it -> fetch immediately
             // The announcing peer holds the torrent: feed it straight to the
             // in-flight metadata download instead of re-finding peers via DHT.
-            if (m_inFlight.contains(ih))
-                m_session->connectDHTMetadataPeer(ih, peerIP, a->port);
+            // connectDHTMetadataPeer touches GUI-thread Session state, so marshal it.
+            if (m_inFlight.contains(event.infoHashHex))
+            {
+                const QString ih = event.infoHashHex;
+                const QString ip = event.ip;
+                const int port = event.port;
+                QMetaObject::invokeMethod(m_session, [s = m_session, ih, ip, port] { s->connectDHTMetadataPeer(ih, ip, port); }, Qt::QueuedConnection);
+            }
         }
         break;
-    case lt::dht_sample_infohashes_alert::alert_type:
+    case HarvestAlertEvent::Type::SampleInfohashes:
         {
-            const auto *a = static_cast<const lt::dht_sample_infohashes_alert *>(alert);
-            for (const lt::sha1_hash &sample : a->samples())
-            {
-                const QString ih = hexOf(sample);
+            for (const QString &ih : event.samples)
                 postSighting(ih, u"sample"_s, {}, 0);
-            }
             // Recurse into the returned (closer) nodes to traverse this region of
             // the keyspace more deeply, bounded by the per-tick sample budget.
             if (m_activeCrawl)
             {
                 int recursed = 0;
-                for (const auto &node : a->nodes())
+                for (const auto &node : event.nodes)
                 {
                     if ((recursed++ >= RECURSE_NODES_PER_SAMPLE) || (m_sampleBudget <= 0))
                         break;
-                    m_nativeSession->dht_sample_infohashes(node.second, randomTarget());
+                    if (const auto ep = toEndpoint(node.first, node.second))
+                    {
+                        m_nativeSession->dht_sample_infohashes(*ep, randomTarget());
+                        --m_sampleBudget;
+                    }
+                }
+            }
+        }
+        break;
+    case HarvestAlertEvent::Type::LiveNodes:
+        {
+            if (!m_activeCrawl)
+                break;
+            int sampled = 0;
+            for (const auto &node : event.nodes)
+            {
+                if ((sampled++ >= MAX_SAMPLE_NODES_PER_TICK) || (m_sampleBudget <= 0))
+                    break;
+                if (const auto ep = toEndpoint(node.first, node.second))
+                {
+                    m_nativeSession->dht_sample_infohashes(*ep, randomTarget());
                     --m_sampleBudget;
                 }
             }
         }
         break;
-    case lt::dht_live_nodes_alert::alert_type:
-        {
-            if (!m_activeCrawl)
-                break;
-            const auto *a = static_cast<const lt::dht_live_nodes_alert *>(alert);
-            const auto nodes = a->nodes();
-            int sampled = 0;
-            for (const auto &node : nodes)
-            {
-                if ((sampled++ >= MAX_SAMPLE_NODES_PER_TICK) || (m_sampleBudget <= 0))
-                    break;
-                m_nativeSession->dht_sample_infohashes(node.second, randomTarget());
-                --m_sampleBudget;
-            }
-        }
-        break;
-    case lt::dht_get_peers_reply_alert::alert_type:
+    case HarvestAlertEvent::Type::GetPeersReply:
         {
             // Real swarm size for a known infohash (BEP-33-ish): store the peer
             // count so the index/Torznab can report seeders/peers instead of a
             // sighting proxy.
-            const auto *a = static_cast<const lt::dht_get_peers_reply_alert *>(alert);
-            const QString ih = hexOf(a->info_hash);
-            const int peers = a->num_peers();
-            if (m_store && (peers > 0))
+            if (m_store && (event.numPeers > 0))
             {
+                const QString ih = event.infoHashHex;
+                const int peers = event.numPeers;
                 QMetaObject::invokeMethod(m_store, [store = m_store, ih, peers] { store->updateSwarm(ih, peers); }, Qt::QueuedConnection);
             }
         }
         break;
-    case lt::peer_connect_alert::alert_type:
+    case HarvestAlertEvent::Type::PeerConnect:
         {
             // Seed BEP-51 sampling from the DHT nodes of peers we connect to in
             // swarms (our own ephemeral metadata fetches and real torrents alike).
             // A swarm peer is a live, reachable host whose DHT node stores the
             // infohashes announced near it -> a high-quality sample target.
-            //
-            // Only outgoing connections carry the peer's real listen port (we
-            // dialed it); incoming connections expose an ephemeral source port.
-            // libtorrent doesn't surface the peer's advertised DHT (BEP-5 PORT)
-            // value, and most clients run DHT on their BT listen port, so we use
-            // that as a best-effort sample endpoint. Misses just time out silently.
-            if (!m_activeCrawl || (m_sampleBudget <= 0))
+            if (!m_activeCrawl || (m_sampleBudget <= 0) || event.nodes.isEmpty())
                 break;
-            const auto *a = static_cast<const lt::peer_connect_alert *>(alert);
-            if (a->direction != lt::peer_connect_alert::direction_t::out)
-                break;
-            const lt::tcp::endpoint &tep = a->endpoint;
-            if (tep.address().is_unspecified() || (tep.port() == 0))
-                break;
-            m_nativeSession->dht_sample_infohashes(lt::udp::endpoint(tep.address(), tep.port()), randomTarget());
-            --m_sampleBudget;
+            const auto &node = event.nodes.first();
+            if (const auto ep = toEndpoint(node.first, node.second))
+            {
+                m_nativeSession->dht_sample_infohashes(*ep, randomTarget());
+                --m_sampleBudget;
+            }
         }
-        break;
-    default:
         break;
     }
 }
@@ -429,7 +568,8 @@ void DHTHarvester::onTimeoutTimer()
 
     for (const QString &ih : timedOut)
     {
-        m_session->cancelDownloadMetadata(TorrentID::fromString(ih));
+        // GUI-thread Session state -> marshal the cancellation.
+        QMetaObject::invokeMethod(m_session, [s = m_session, ih] { s->cancelDownloadMetadata(TorrentID::fromString(ih)); }, Qt::QueuedConnection);
         m_inFlight.remove(ih);
         m_queued.remove(ih);
         if (m_store)
@@ -438,7 +578,7 @@ void DHTHarvester::onTimeoutTimer()
         }
     }
 
-    pump();
+    requestPump();
 }
 
 void DHTHarvester::enqueue(const QString &infoHashV1)
@@ -454,12 +594,12 @@ void DHTHarvester::enqueue(const QString &infoHashV1)
 
     m_queued.insert(infoHashV1);
     m_pending.enqueue(infoHashV1);
-    pump();
+    requestPump();
 }
 
 void DHTHarvester::onScheduleTimer()
 {
-    if (!m_running || !m_store)
+    if (!m_running || !m_store || m_candidateRequestInFlight)
         return;
 
     const int room = m_maxConcurrent - m_inFlight.size();
@@ -468,12 +608,20 @@ void DHTHarvester::onScheduleTimer()
 
     // Pull a little ahead of the free slots so the pump never starves; the store
     // returns only infohashes that still need metadata and are off backoff,
-    // most promising first.
+    // most promising first. The query runs on the store thread and the result is
+    // delivered back asynchronously (onCandidates) -- never blocking this thread.
     const int batch = qMin(room * 4, MAX_PENDING - m_pending.size());
-    QList<QString> candidates;
-    QMetaObject::invokeMethod(m_store, [store = m_store, batch] { return store->candidatesForMetadata(batch); }
-        , Qt::BlockingQueuedConnection, &candidates);
+    m_candidateRequestInFlight = true;
+    QMetaObject::invokeMethod(m_store, [this, store = m_store, batch]
+    {
+        const QList<QString> candidates = store->candidatesForMetadata(batch);
+        QMetaObject::invokeMethod(this, [this, candidates] { onCandidates(candidates); }, Qt::QueuedConnection);
+    }, Qt::QueuedConnection);
+}
 
+void DHTHarvester::onCandidates(const QList<QString> &candidates)
+{
+    m_candidateRequestInFlight = false;
     for (const QString &ih : candidates)
         enqueue(ih);
 }
@@ -495,8 +643,24 @@ void DHTHarvester::onPruneTimer()
     }, Qt::QueuedConnection);
 }
 
+void DHTHarvester::requestPump()
+{
+    // Coalesce: at the DHT discovery rate pump() would otherwise be called
+    // thousands of times per second. Run it at most once per event-loop turn.
+    if (m_pumpScheduled)
+        return;
+    m_pumpScheduled = true;
+    QMetaObject::invokeMethod(this, [this] { m_pumpScheduled = false; pump(); }, Qt::QueuedConnection);
+}
+
 void DHTHarvester::pump()
 {
+    // Do not add metadata-download torrents until the Session has finished restoring:
+    // their add_torrent_alerts would otherwise corrupt the startup resume-data
+    // accounting and stall the restore (the GUI would hang on "loading torrents").
+    if (!m_sessionRestored)
+        return;
+
     while ((m_inFlight.size() < m_maxConcurrent) && !m_pending.isEmpty())
     {
         const QString ih = m_pending.dequeue();
@@ -506,6 +670,8 @@ void DHTHarvester::pump()
             continue;
         }
 
+        // TorrentDescriptor::parse() is pure (no Qt/Session state), so it runs here
+        // on the worker thread.
         const QString magnet = u"magnet:?xt=urn:btih:"_s + ih;
         const auto descr = TorrentDescriptor::parse(magnet);
         if (!descr)
@@ -514,16 +680,25 @@ void DHTHarvester::pump()
             continue;
         }
 
-        if (m_session->downloadMetadata(descr.value()))
+        // Claim the slot optimistically, then start the (GUI-thread-affine) metadata
+        // download on the Session thread. If it declines (already known/fetching),
+        // it posts back onDownloadRejected() to release the claim.
+        m_inFlight.insert(ih, nowMs());
+        QMetaObject::invokeMethod(m_session, [this, s = m_session, d = descr.value(), ih]
         {
-            m_inFlight.insert(ih, nowMs());
-        }
-        else
-        {
-            // Already a known torrent / already fetching: drop our claim.
-            m_queued.remove(ih);
-        }
+            if (!s->downloadMetadata(d))
+                QMetaObject::invokeMethod(this, [this, ih] { onDownloadRejected(ih); }, Qt::QueuedConnection);
+        }, Qt::QueuedConnection);
     }
+}
+
+void DHTHarvester::onDownloadRejected(const QString &infoHashV1)
+{
+    // The Session already knew this torrent (or was already fetching it): release
+    // the optimistic claim so the slot can be reused.
+    m_inFlight.remove(infoHashV1);
+    m_queued.remove(infoHashV1);
+    requestPump();
 }
 
 void DHTHarvester::postSighting(const QString &infoHashV1, const QString &source, const QString &ip, const int port)
@@ -589,5 +764,5 @@ void DHTHarvester::onMetadataDownloaded(const TorrentInfo &info)
 
     emit torrentIndexed(v1, torrent.name);
 
-    pump();
+    requestPump();
 }

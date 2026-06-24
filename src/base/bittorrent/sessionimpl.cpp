@@ -58,9 +58,11 @@
 #include <libtorrent/session_status.hpp>
 #include <libtorrent/torrent_info.hpp>
 
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDeadlineTimer>
 #include <QDebug>
+#include <QEvent>
 #include <QDir>
 #include <QFuture>
 #include <QHostAddress>
@@ -450,7 +452,7 @@ SessionImpl::SessionImpl(QObject *parent)
     , m_isPeXEnabled(BITTORRENT_SESSION_KEY(u"PeXEnabled"_s), true)
     , m_isDHTHarvesterEnabled(BITTORRENT_SESSION_KEY(u"DHTHarvesterEnabled"_s), false)
     , m_isDHTHarvesterActiveCrawlEnabled(BITTORRENT_SESSION_KEY(u"DHTHarvesterActiveCrawl"_s), true)
-    , m_dhtHarvesterMaxConcurrentMetadata(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxConcurrentMetadata"_s), 30)
+    , m_dhtHarvesterMaxConcurrentMetadata(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxConcurrentMetadata"_s), 8)
     , m_isAutoBanUnknownPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanUnknownPeer"_s), false)
     , m_isAutoBanBTPlayerPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanBTPlayerPeer"_s), false)
     , m_isShadowBanEnabled(BITTORRENT_SESSION_KEY(u"ShadowBan"_s), false)
@@ -710,10 +712,17 @@ SessionImpl::SessionImpl(QObject *parent)
 
 SessionImpl::~SessionImpl()
 {
-    // Stop and destroy the DHT harvester first: its teardown cancels in-flight
-    // metadata downloads via the still-alive native session.
-    delete m_dhtHarvester;
-    m_dhtHarvester = nullptr;
+    // Stop and destroy the DHT harvester first: it runs on its own worker thread.
+    // shutdown() drains and quits that thread (blocking); its stop() posts in-flight
+    // metadata cancellations back to us (queued), so dispatch those here on the GUI
+    // thread while the native session is still alive, then delete it.
+    if (m_dhtHarvester)
+    {
+        m_dhtHarvester->shutdown();
+        QCoreApplication::sendPostedEvents(this, QEvent::MetaCall);
+        delete m_dhtHarvester;
+        m_dhtHarvester = nullptr;
+    }
 
     m_nativeSession->pause();
 
@@ -1990,6 +1999,12 @@ void SessionImpl::endStartup(ResumeSessionContext *context)
         m_isRestored = true;
         emit startupProgressUpdated(100);
         emit restored();
+
+        // Now that resume-data accounting is finished, let the DHT harvester begin
+        // fetching metadata (it adds ephemeral torrents, which must not interfere
+        // with the startup torrent count).
+        if (m_dhtHarvester)
+            m_dhtHarvester->setSessionRestored(true);
     });
 }
 
@@ -2099,9 +2114,13 @@ void SessionImpl::initializeNativeSession()
     const Path harvestDBPath = specialFolderLocation(SpecialFolder::Data) / Path(u"dht_index.db"_s);
     m_dhtHarvester = new DHTHarvester(this, m_nativeSession, harvestDBPath);
     connect(m_dhtHarvester, &DHTHarvester::torrentIndexed, this, &Session::dhtTorrentIndexed);
+    // Latch the initial configuration while the harvester is still on this (GUI)
+    // thread, then move it onto its own low-priority worker thread.
+    m_dhtHarvester->setBoundInterface(networkInterface(), networkInterfaceName());
     m_dhtHarvester->setActiveCrawlEnabled(isDHTHarvesterActiveCrawlEnabled());
     m_dhtHarvester->setMaxConcurrentMetadata(DHTHarvesterMaxConcurrentMetadata());
     m_dhtHarvester->setEnabled(isDHTHarvesterEnabled());
+    m_dhtHarvester->startWorker();
 }
 
 void SessionImpl::processBannedIPs(lt::ip_filter &filter)
@@ -2386,28 +2405,31 @@ lt::settings_pack SessionImpl::loadLTSettings() const
     settingsPack.set_int(lt::settings_pack::active_lsd_limit, -1);
     settingsPack.set_int(lt::settings_pack::alert_queue_size, std::numeric_limits<int>::max() / 2);
 
-    // DHT harvester tuning: when crawling the mainline DHT we want to *receive*
-    // as much incoming get_peers/announce traffic as possible (passive discovery)
-    // and answer it, plus run a denser routing table for active BEP-51 sampling.
-    // Defaults throttle DHT hard (8 KiB/s up, 5 in-flight queries), which starves
-    // a crawler. These only take effect while the harvester is enabled.
+    // DHT harvester tuning: a *background* discovery profile. We still lift the DHT
+    // throttle enough to receive a healthy stream of incoming get_peers/announce
+    // traffic (passive discovery) and answer it, but deliberately stay well below
+    // the previous aggressive settings so the crawler's load on CPU, the network,
+    // and the (now off-GUI-thread) harvester stays light. These only take effect
+    // while the harvester is enabled.
     if (isDHTHarvesterEnabled())
     {
-        // Let the node serve far more DHT traffic than the default 8 KiB/s so it
-        // stays reachable to the swarm and our replies don't get dropped.
-        settingsPack.set_int(lt::settings_pack::dht_upload_rate_limit, 64 * 1024);
+        // Serve more DHT traffic than the default 8 KiB/s so we stay reachable to
+        // the swarm and our replies aren't dropped, but a quarter of the old cap.
+        settingsPack.set_int(lt::settings_pack::dht_upload_rate_limit, 16 * 1024);
         // Don't ban peers that flood us with queries — that's exactly the traffic
         // a passive harvester wants to keep seeing.
         settingsPack.set_int(lt::settings_pack::dht_block_ratelimit, 50);
-        // Keep a large peer/torrent store so we observe more of the keyspace.
-        settingsPack.set_int(lt::settings_pack::dht_max_peers, 1000);
-        settingsPack.set_int(lt::settings_pack::dht_max_torrents, 5000);
-        settingsPack.set_int(lt::settings_pack::dht_max_dht_items, 5000);
-        // More peers per get_peers reply -> better real swarm counts (B1).
-        settingsPack.set_int(lt::settings_pack::dht_max_peers_reply, 100);
-        // Allow many concurrent in-flight DHT requests for active sampling.
+        // A moderate peer/torrent store: enough keyspace coverage without the
+        // memory and bookkeeping cost of the previous 5000-item tables.
+        settingsPack.set_int(lt::settings_pack::dht_max_peers, 500);
+        settingsPack.set_int(lt::settings_pack::dht_max_torrents, 2000);
+        settingsPack.set_int(lt::settings_pack::dht_max_dht_items, 2000);
+        // Enough peers per get_peers reply for usable swarm counts (B1).
+        settingsPack.set_int(lt::settings_pack::dht_max_peers_reply, 50);
         settingsPack.set_int(lt::settings_pack::dht_announce_interval, 60);
-        settingsPack.set_bool(lt::settings_pack::dht_aggressive_lookups, true);
+        // Aggressive lookups multiply query fan-out and the returned-alert volume
+        // the GUI thread must extract; leave them off for a steady background load.
+        settingsPack.set_bool(lt::settings_pack::dht_aggressive_lookups, false);
     }
 
     // Outgoing ports
@@ -4082,6 +4104,8 @@ void SessionImpl::setNetworkInterface(const QString &iface)
     {
         m_networkInterface = iface;
         configureListeningInterface();
+        if (m_dhtHarvester)
+            m_dhtHarvester->setBoundInterface(networkInterface(), networkInterfaceName());
     }
 }
 
@@ -4093,6 +4117,8 @@ QString SessionImpl::networkInterfaceName() const
 void SessionImpl::setNetworkInterfaceName(const QString &name)
 {
     m_networkInterfaceName = name;
+    if (m_dhtHarvester)
+        m_dhtHarvester->setBoundInterface(networkInterface(), networkInterfaceName());
 }
 
 QString SessionImpl::networkInterfaceAddress() const
@@ -6091,6 +6117,79 @@ void SessionImpl::setTorrentContentLayout(const TorrentContentLayout value)
     m_torrentContentLayout = value;
 }
 
+void SessionImpl::dispatchHarvesterAlert(const lt::alert *alert)
+{
+    // Runs on the GUI thread. libtorrent owns `alert` and recycles it after this
+    // alert batch, so we copy everything the harvester needs into a value type and
+    // hand it off to the harvester's worker thread — never touching `alert` there.
+    if (!m_dhtHarvester)
+        return;
+
+    HarvestAlertEvent event;
+    switch (alert->type())
+    {
+    case lt::dht_get_peers_alert::alert_type:
+        {
+            const auto *a = static_cast<const lt::dht_get_peers_alert *>(alert);
+            event.type = HarvestAlertEvent::Type::GetPeers;
+            event.infoHashHex = SHA1Hash(a->info_hash).toString();
+        }
+        break;
+    case lt::dht_announce_alert::alert_type:
+        {
+            const auto *a = static_cast<const lt::dht_announce_alert *>(alert);
+            event.type = HarvestAlertEvent::Type::Announce;
+            event.infoHashHex = SHA1Hash(a->info_hash).toString();
+            event.ip = QString::fromStdString(a->ip.to_string());
+            event.port = a->port;
+        }
+        break;
+    case lt::dht_sample_infohashes_alert::alert_type:
+        {
+            const auto *a = static_cast<const lt::dht_sample_infohashes_alert *>(alert);
+            event.type = HarvestAlertEvent::Type::SampleInfohashes;
+            for (const lt::sha1_hash &sample : a->samples())
+                event.samples.append(SHA1Hash(sample).toString());
+            for (const auto &node : a->nodes())
+                event.nodes.append({QString::fromStdString(node.second.address().to_string()), node.second.port()});
+        }
+        break;
+    case lt::dht_live_nodes_alert::alert_type:
+        {
+            const auto *a = static_cast<const lt::dht_live_nodes_alert *>(alert);
+            event.type = HarvestAlertEvent::Type::LiveNodes;
+            for (const auto &node : a->nodes())
+                event.nodes.append({QString::fromStdString(node.second.address().to_string()), node.second.port()});
+        }
+        break;
+    case lt::dht_get_peers_reply_alert::alert_type:
+        {
+            const auto *a = static_cast<const lt::dht_get_peers_reply_alert *>(alert);
+            event.type = HarvestAlertEvent::Type::GetPeersReply;
+            event.infoHashHex = SHA1Hash(a->info_hash).toString();
+            event.numPeers = a->num_peers();
+        }
+        break;
+    case lt::peer_connect_alert::alert_type:
+        {
+            const auto *a = static_cast<const lt::peer_connect_alert *>(alert);
+            // Only outgoing connections expose the peer's real listen port.
+            if (a->direction != lt::peer_connect_alert::direction_t::out)
+                return;
+            const lt::tcp::endpoint &tep = a->endpoint;
+            if (tep.address().is_unspecified() || (tep.port() == 0))
+                return;
+            event.type = HarvestAlertEvent::Type::PeerConnect;
+            event.nodes.append({QString::fromStdString(tep.address().to_string()), tep.port()});
+        }
+        break;
+    default:
+        return;
+    }
+
+    m_dhtHarvester->postAlertEvent(event);
+}
+
 // Read alerts sent by libtorrent session
 void SessionImpl::readAlerts()
 {
@@ -6276,8 +6375,7 @@ void SessionImpl::handleAlert(lt::alert *alert)
         case lt::dht_live_nodes_alert::alert_type:
         case lt::dht_get_peers_reply_alert::alert_type:
         case lt::peer_connect_alert::alert_type:
-            if (m_dhtHarvester)
-                m_dhtHarvester->handleAlert(alert);
+            dispatchHarvesterAlert(alert);
             break;
         }
     }

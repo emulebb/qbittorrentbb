@@ -30,8 +30,12 @@
 
 #include <libtorrent/fwd.hpp>
 
+#include <atomic>
+
 #include <QHash>
+#include <QList>
 #include <QObject>
+#include <QPair>
 #include <QQueue>
 #include <QSet>
 #include <QString>
@@ -49,13 +53,42 @@ namespace BitTorrent
     struct HarvestSighting;
     struct HarvestStats;
 
+    // A DHT alert reduced to a thread-safe value. SessionImpl extracts the fields
+    // it needs from the (short-lived, libtorrent-owned) lt::alert on the GUI thread
+    // and posts one of these to the harvester's worker thread, where it is handled
+    // without ever touching libtorrent's recycled alert memory. Endpoints are kept
+    // as (ip-string, port) so this struct stays free of libtorrent types.
+    struct HarvestAlertEvent
+    {
+        enum class Type : quint8
+        {
+            GetPeers,
+            Announce,
+            SampleInfohashes,
+            LiveNodes,
+            GetPeersReply,
+            PeerConnect
+        };
+
+        Type type;
+        QString infoHashHex;                  // GetPeers / Announce / GetPeersReply
+        QString ip;                           // Announce
+        int port = 0;                         // Announce
+        int numPeers = 0;                     // GetPeersReply
+        QList<QString> samples;               // SampleInfohashes (hex infohashes)
+        QList<QPair<QString, quint16>> nodes; // sample/live-node/peer-connect endpoints to recurse into
+    };
+
     // Magnetico/btdigg-style BitTorrent DHT harvester.
     //
-    // Lives on the Session thread (where libtorrent alerts are dispatched) and
-    // owns a worker thread hosting the HarvestStore (SQLite). It discovers
-    // infohashes passively (incoming get_peers/announce) and actively (BEP-51
-    // sample_infohashes), then fetches full metadata via the Session's existing
-    // ephemeral metadata-download path (BEP-9) and indexes the result.
+    // Runs entirely on its own low-priority worker thread (created by startWorker())
+    // so its crawling never steals cycles from — or blocks — the GUI thread. It also
+    // owns a second worker thread hosting the HarvestStore (SQLite). SessionImpl
+    // reduces each DHT alert to a HarvestAlertEvent on the GUI thread and posts it
+    // here; the harvester discovers infohashes passively (incoming get_peers/announce)
+    // and actively (BEP-51 sample_infohashes), then fetches full metadata via the
+    // Session's existing ephemeral metadata-download path (BEP-9) and indexes the
+    // result. Calls back into the (GUI-thread-affine) Session are marshalled.
     //
     // All DHT/BT traffic egresses through libtorrent's bound interface; the
     // harvester refuses to run unless the Session is bound to a (VPN) network
@@ -69,15 +102,37 @@ namespace BitTorrent
         DHTHarvester(Session *session, lt::session *nativeSession, const Path &dbPath, QObject *parent = nullptr);
         ~DHTHarvester() override;
 
+        // Move the harvester onto its own worker thread and start its event loop.
+        // Call once, on the GUI thread, after the initial setEnabled/setActiveCrawl/
+        // setMaxConcurrent/setBoundInterface configuration has been latched.
+        void startWorker();
+
+        // Stop crawling and quit the worker thread (GUI thread, blocking). Call this
+        // before deleting the harvester so any in-flight metadata cancellations are
+        // posted to the Session before tear-down.
+        void shutdown();
+
+        // All setters are thread-safe: when called from another thread they marshal
+        // onto the worker thread. isEnabled() returns the last value set (atomic).
         void setEnabled(bool enabled);
         bool isEnabled() const;
         void setActiveCrawlEnabled(bool enabled);
         void setMaxConcurrentMetadata(int max);
+        // Snapshot of the Session's bound (VPN) interface, since the harvester must
+        // not read SessionImpl's CachedSettingValue members across threads.
+        void setBoundInterface(const QString &configName, const QString &humanName);
 
-        // Invoked by SessionImpl::handleAlert() for the DHT alert types.
-        void handleAlert(const lt::alert *alert);
+        // Gate: until the Session has finished restoring its torrents, the harvester
+        // must NOT start metadata downloads. Those add ephemeral torrents whose
+        // add_torrent_alerts would corrupt the startup resume-data accounting and
+        // stall the session restore. Passive discovery (sightings/sampling) is fine.
+        void setSessionRestored(bool restored);
 
-        // The store lives on the worker thread; the GUI uses it via
+        // Invoked by SessionImpl::dispatchHarvesterAlert() on the GUI thread; posts
+        // the event to the worker thread.
+        void postAlertEvent(const HarvestAlertEvent &event);
+
+        // The store lives on its own worker thread; the GUI uses it via
         // blocking-queued invocation.
         HarvestStore *store() const;
 
@@ -87,10 +142,14 @@ namespace BitTorrent
         void torrentIndexed(const QString &infoHashV1, const QString &name);
 
     private slots:
+        void onThreadStarted();   // runs on the worker thread: create timers, apply latched state
+        void onAlertEvent(const BitTorrent::HarvestAlertEvent &event);
         void onMetadataDownloaded(const BitTorrent::TorrentInfo &info);
         void onSampleTimer();
         void onTimeoutTimer();
         void onScheduleTimer();   // pull persistent metadata candidates from the store
+        void onCandidates(const QList<QString> &candidates);  // async reply from the store
+        void onDownloadRejected(const QString &infoHashV1);   // GUI declined a metadata fetch
         void onPruneTimer();      // retention sweep
         void flushSightings();
 
@@ -99,20 +158,32 @@ namespace BitTorrent
         void stop();
         void enqueue(const QString &infoHashV1);
         void pump();
+        void requestPump();       // coalesce pump() to at most once per event-loop turn
         void postSighting(const QString &infoHashV1, const QString &source, const QString &ip, int port);
         bool vpnReady() const;
 
         Session *m_session = nullptr;
         lt::session *m_nativeSession = nullptr;
         const Path m_path;
-        HarvestStore *m_store = nullptr;
+        HarvestStore *m_store = nullptr;            // worker-thread-only handle
+        // Published copy of m_store read by store() from the GUI thread. The store is
+        // created once and lives until ~DHTHarvester, so this only ever transitions
+        // null -> store; an atomic makes that publication race-free.
+        std::atomic<HarvestStore *> m_storeHandle = nullptr;
         QThread *m_storeThread = nullptr;
+        QThread *m_thread = nullptr;        // the harvester's own (low-priority) worker thread
 
+        bool m_workerStarted = false;       // worker event loop running; setters then marshal
+        bool m_sessionRestored = false;     // Session finished restoring -> fetches allowed
         bool m_enabled = false;
         bool m_activeCrawl = true;
-        int m_maxConcurrent = 20;
+        int m_maxConcurrent = 8;
         bool m_running = false;
         bool m_warnedNoVPN = false;
+        bool m_pumpScheduled = false;            // a coalesced pump() is already queued
+        bool m_candidateRequestInFlight = false; // a store candidate query is outstanding
+        QString m_boundIfaceConfigName;     // snapshot of Session::networkInterface()
+        QString m_boundIfaceHumanName;      // snapshot of Session::networkInterfaceName()
 
         QQueue<QString> m_pending;
         QSet<QString> m_queued;             // in m_pending or m_inFlight (dedupe)
