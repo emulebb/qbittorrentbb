@@ -1014,7 +1014,24 @@ void DHTHarvester::flushSightings()
     if (!m_store || m_sightingBuffer.isEmpty())
         return;
 
-    const QList<HarvestSighting> sightings = m_sightingBuffer;
+    // Coalesce exact-duplicate sightings buffered in this window: with the more
+    // aggressive crawl, the same infohash is frequently asked about / sampled many
+    // times per second from the same endpoint. Collapsing those identical rows before
+    // the (single-transaction) batch write keeps the store thread from multiplying
+    // redundant INSERTs as the sample rate rises.
+    QList<HarvestSighting> sightings;
+    sightings.reserve(m_sightingBuffer.size());
+    QSet<QString> seen;
+    seen.reserve(m_sightingBuffer.size());
+    for (const HarvestSighting &s : m_sightingBuffer)
+    {
+        const QString key = s.infoHashV1 + u'|' + s.source + u'|' + s.peerIP + u'|' + QString::number(s.peerPort);
+        if (!seen.contains(key))
+        {
+            seen.insert(key);
+            sightings.append(s);
+        }
+    }
     m_sightingBuffer.clear();
     QMetaObject::invokeMethod(m_store, [store = m_store, sightings] { store->recordSightings(sightings); }, Qt::QueuedConnection);
 }
