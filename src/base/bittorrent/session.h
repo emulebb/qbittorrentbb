@@ -244,13 +244,17 @@ namespace BitTorrent
         virtual void setAutoBanUnknownCountries(const QStringList &countries) = 0;
         virtual QStringList autoBanBlockedCountries() const = 0;
         virtual void setAutoBanBlockedCountries(const QStringList &countries) = 0;
-        virtual HarvestSearchPage searchDHTIndex(const QString &query, int limit, int offset) const = 0;
-        virtual HarvestSearchPage recentDHTIndex(int limit, int offset) const = 0;
-        // Grouped-tree variants: per-content-type counts plus windowed reads scoped to
-        // a single content type (drive the lazily loaded tree on the DHT Index tab).
+        virtual HarvestSearchPage searchDHTIndex(const QString &query, int limit, int offset
+            , HarvestSortColumn sortColumn = HarvestSortColumn::Default, bool descending = false) const = 0;
+        virtual HarvestSearchPage recentDHTIndex(int limit, int offset
+            , HarvestSortColumn sortColumn = HarvestSortColumn::Default, bool descending = false) const = 0;
+        // Per-content-type counts (drive the filter sidebar) plus windowed reads scoped
+        // to a single content type (drive the table while a filter is selected).
         virtual QList<HarvestTypeCount> dhtIndexTypeCounts(const QString &query) const = 0;
-        virtual HarvestSearchPage searchDHTIndexByType(const QString &query, const QString &contentType, int limit, int offset) const = 0;
-        virtual HarvestSearchPage recentDHTIndexByType(const QString &contentType, int limit, int offset) const = 0;
+        virtual HarvestSearchPage searchDHTIndexByType(const QString &query, const QString &contentType, int limit, int offset
+            , HarvestSortColumn sortColumn = HarvestSortColumn::Default, bool descending = false) const = 0;
+        virtual HarvestSearchPage recentDHTIndexByType(const QString &contentType, int limit, int offset
+            , HarvestSortColumn sortColumn = HarvestSortColumn::Default, bool descending = false) const = 0;
         virtual QByteArray dhtTorrentMetadata(const QString &infoHashV1) const = 0;
         virtual void connectDHTMetadataPeer(const QString &infoHashV1, const QString &ip, int port) = 0;
         virtual HarvestStats dhtHarvestStats() const = 0;

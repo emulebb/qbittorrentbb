@@ -999,7 +999,8 @@ void SessionImpl::setAutoBanBlockedCountries(const QStringList &countries)
     g_autoBanPolicy.blockedCountries = countries;
 }
 
-HarvestSearchPage SessionImpl::searchDHTIndex(const QString &query, const int limit, const int offset) const
+HarvestSearchPage SessionImpl::searchDHTIndex(const QString &query, const int limit, const int offset
+        , const HarvestSortColumn sortColumn, const bool descending) const
 {
     if (!m_dhtHarvester)
         return {};
@@ -1009,12 +1010,14 @@ HarvestSearchPage SessionImpl::searchDHTIndex(const QString &query, const int li
         return {};
 
     HarvestSearchPage page;
-    QMetaObject::invokeMethod(store, [store, query, limit, offset] { return store->search(query, limit, offset); }
+    QMetaObject::invokeMethod(store, [store, query, limit, offset, sortColumn, descending]
+        { return store->search(query, limit, offset, sortColumn, descending); }
         , Qt::BlockingQueuedConnection, &page);
     return page;
 }
 
-HarvestSearchPage SessionImpl::recentDHTIndex(const int limit, const int offset) const
+HarvestSearchPage SessionImpl::recentDHTIndex(const int limit, const int offset
+        , const HarvestSortColumn sortColumn, const bool descending) const
 {
     if (!m_dhtHarvester)
         return {};
@@ -1024,7 +1027,8 @@ HarvestSearchPage SessionImpl::recentDHTIndex(const int limit, const int offset)
         return {};
 
     HarvestSearchPage page;
-    QMetaObject::invokeMethod(store, [store, limit, offset] { return store->recent(limit, offset); }
+    QMetaObject::invokeMethod(store, [store, limit, offset, sortColumn, descending]
+        { return store->recent(limit, offset, sortColumn, descending); }
         , Qt::BlockingQueuedConnection, &page);
     return page;
 }
@@ -1044,7 +1048,8 @@ QList<HarvestTypeCount> SessionImpl::dhtIndexTypeCounts(const QString &query) co
     return counts;
 }
 
-HarvestSearchPage SessionImpl::searchDHTIndexByType(const QString &query, const QString &contentType, const int limit, const int offset) const
+HarvestSearchPage SessionImpl::searchDHTIndexByType(const QString &query, const QString &contentType, const int limit, const int offset
+        , const HarvestSortColumn sortColumn, const bool descending) const
 {
     if (!m_dhtHarvester)
         return {};
@@ -1054,12 +1059,14 @@ HarvestSearchPage SessionImpl::searchDHTIndexByType(const QString &query, const 
         return {};
 
     HarvestSearchPage page;
-    QMetaObject::invokeMethod(store, [store, query, contentType, limit, offset] { return store->searchByType(query, contentType, limit, offset); }
+    QMetaObject::invokeMethod(store, [store, query, contentType, limit, offset, sortColumn, descending]
+        { return store->searchByType(query, contentType, limit, offset, sortColumn, descending); }
         , Qt::BlockingQueuedConnection, &page);
     return page;
 }
 
-HarvestSearchPage SessionImpl::recentDHTIndexByType(const QString &contentType, const int limit, const int offset) const
+HarvestSearchPage SessionImpl::recentDHTIndexByType(const QString &contentType, const int limit, const int offset
+        , const HarvestSortColumn sortColumn, const bool descending) const
 {
     if (!m_dhtHarvester)
         return {};
@@ -1069,7 +1076,8 @@ HarvestSearchPage SessionImpl::recentDHTIndexByType(const QString &contentType, 
         return {};
 
     HarvestSearchPage page;
-    QMetaObject::invokeMethod(store, [store, contentType, limit, offset] { return store->recentByType(contentType, limit, offset); }
+    QMetaObject::invokeMethod(store, [store, contentType, limit, offset, sortColumn, descending]
+        { return store->recentByType(contentType, limit, offset, sortColumn, descending); }
         , Qt::BlockingQueuedConnection, &page);
     return page;
 }

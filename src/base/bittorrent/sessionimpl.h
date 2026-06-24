@@ -219,11 +219,15 @@ namespace BitTorrent
         void setAutoBanUnknownCountries(const QStringList &countries) override;
         QStringList autoBanBlockedCountries() const override;
         void setAutoBanBlockedCountries(const QStringList &countries) override;
-        HarvestSearchPage searchDHTIndex(const QString &query, int limit, int offset) const override;
-        HarvestSearchPage recentDHTIndex(int limit, int offset) const override;
+        HarvestSearchPage searchDHTIndex(const QString &query, int limit, int offset
+            , HarvestSortColumn sortColumn = HarvestSortColumn::Default, bool descending = false) const override;
+        HarvestSearchPage recentDHTIndex(int limit, int offset
+            , HarvestSortColumn sortColumn = HarvestSortColumn::Default, bool descending = false) const override;
         QList<HarvestTypeCount> dhtIndexTypeCounts(const QString &query) const override;
-        HarvestSearchPage searchDHTIndexByType(const QString &query, const QString &contentType, int limit, int offset) const override;
-        HarvestSearchPage recentDHTIndexByType(const QString &contentType, int limit, int offset) const override;
+        HarvestSearchPage searchDHTIndexByType(const QString &query, const QString &contentType, int limit, int offset
+            , HarvestSortColumn sortColumn = HarvestSortColumn::Default, bool descending = false) const override;
+        HarvestSearchPage recentDHTIndexByType(const QString &contentType, int limit, int offset
+            , HarvestSortColumn sortColumn = HarvestSortColumn::Default, bool descending = false) const override;
         QByteArray dhtTorrentMetadata(const QString &infoHashV1) const override;
         void connectDHTMetadataPeer(const QString &infoHashV1, const QString &ip, int port) override;
         HarvestStats dhtHarvestStats() const override;
