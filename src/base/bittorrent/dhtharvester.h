@@ -138,6 +138,13 @@ namespace BitTorrent
         // the event to the worker thread.
         void postAlertEvent(const HarvestAlertEvent &event);
 
+        // Invoked by SessionImpl (GUI thread) when an ephemeral metadata fetch
+        // completes. Marshals to the worker thread via a value-capturing lambda --
+        // the typed metadataDownloaded signal/slot does NOT survive a cross-thread
+        // queued connection (TorrentInfo metatype name fails to resolve), so this
+        // uses the same reliable marshalling as postAlertEvent().
+        void postMetadata(const TorrentInfo &info);
+
         // The store lives on its own worker thread; the GUI uses it via
         // blocking-queued invocation.
         HarvestStore *store() const;

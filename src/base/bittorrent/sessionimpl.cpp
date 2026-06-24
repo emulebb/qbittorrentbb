@@ -6546,6 +6546,13 @@ void SessionImpl::handleMetadataReceivedAlert(const lt::metadata_received_alert 
         const TorrentInfo metadata {*alert->handle.torrent_file()};
         m_nativeSession->remove_torrent(alert->handle, lt::session::delete_files);
 
+        // Deliver to the DHT harvester via its lambda-marshalled entry point: the
+        // typed metadataDownloaded signal does NOT survive the harvester's
+        // cross-thread queued connection (TorrentInfo metatype fails to resolve for
+        // queued delivery), so metadata was silently dropped. Also emit for any
+        // other (same-thread) listeners.
+        if (m_dhtHarvester)
+            m_dhtHarvester->postMetadata(metadata);
         emit metadataDownloaded(metadata);
     }
 }

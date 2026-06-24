@@ -164,10 +164,9 @@ DHTHarvester::DHTHarvester(Session *session, lt::session *nativeSession, const P
     , m_path {dbPath}
 {
     // Timers are NOT created here: they must have affinity to the worker thread,
-    // so onThreadStarted() (which runs on that thread) creates them. The metadata
-    // signal is connected now; once we moveToThread() it auto-degrades to a queued
-    // cross-thread delivery (TorrentInfo is a registered metatype).
-    connect(m_session, &Session::metadataDownloaded, this, &DHTHarvester::onMetadataDownloaded);
+    // so onThreadStarted() (which runs on that thread) creates them. Metadata
+    // completion is delivered via postMetadata() (lambda-marshalled), NOT the typed
+    // metadataDownloaded signal, which silently fails to queue across threads.
 }
 
 DHTHarvester::~DHTHarvester()
@@ -491,6 +490,14 @@ void DHTHarvester::postAlertEvent(const HarvestAlertEvent &event)
     // Called by SessionImpl on the GUI thread with a value-typed snapshot of a DHT
     // alert; hand it to the worker thread, where all crawl logic runs.
     QMetaObject::invokeMethod(this, [this, event] { onAlertEvent(event); }, Qt::QueuedConnection);
+}
+
+void DHTHarvester::postMetadata(const TorrentInfo &info)
+{
+    // Called by SessionImpl on the GUI thread when an ephemeral metadata fetch
+    // completes. Capture TorrentInfo by value into the lambda (no metatype queue
+    // marshalling) and run the handler on the worker thread.
+    QMetaObject::invokeMethod(this, [this, info] { onMetadataDownloaded(info); }, Qt::QueuedConnection);
 }
 
 void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
