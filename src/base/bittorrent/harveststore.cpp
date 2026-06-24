@@ -46,7 +46,7 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace
 {
-    const int DB_VERSION = 4;
+    const int DB_VERSION = 5;
 
     // Fetch-backoff policy for metadata acquisition.
     const int MAX_FETCH_ATTEMPTS = 5;
@@ -219,6 +219,40 @@ void HarvestStore::ensureSchema()
         return;
     }
 
+    if (hasMeta && (version == 4))
+    {
+        LogMsg(QObject::tr("Migrating DHT harvest index from schema %1 to %2.").arg(version).arg(DB_VERSION), Log::INFO);
+        if (!db.transaction())
+            throw RuntimeError(db.lastError().text());
+
+        try
+        {
+            if (!query.exec(u"ALTER TABLE torrents ADD COLUMN announce_count INTEGER NOT NULL DEFAULT 0;"_s))
+                throw RuntimeError(query.lastError().text());
+
+            // Backfill the announce count from the existing sighting history so the
+            // fetch scheduler immediately favours infohashes a peer was seen holding.
+            if (!query.exec(u"UPDATE torrents SET announce_count ="
+                            u" (SELECT COUNT(*) FROM infohash_sightings s"
+                            u"  WHERE s.infohash_v1 = torrents.infohash_v1 AND s.source = 'announce');"_s))
+                throw RuntimeError(query.lastError().text());
+
+            query.prepare(u"UPDATE harvest_meta SET value = :version WHERE name = 'version';"_s);
+            query.bindValue(u":version"_s, DB_VERSION);
+            if (!query.exec())
+                throw RuntimeError(query.lastError().text());
+
+            if (!db.commit())
+                throw RuntimeError(db.lastError().text());
+        }
+        catch (const RuntimeError &)
+        {
+            db.rollback();
+            throw;
+        }
+        return;
+    }
+
     // Fresh DB or version mismatch: reset our tables and (re)create.
     if (hasMeta)
         LogMsg(QObject::tr("Resetting DHT harvest index (schema changed)."), Log::INFO);
@@ -272,6 +306,7 @@ void HarvestStore::createSchema()
              u"fetch_attempts INTEGER NOT NULL DEFAULT 0,"
              u"last_attempt_ms INTEGER NOT NULL DEFAULT 0,"
              u"availability_score INTEGER NOT NULL DEFAULT 0,"
+             u"announce_count INTEGER NOT NULL DEFAULT 0,"
              u"swarm_peers INTEGER NOT NULL DEFAULT 0,"
              u"swarm_seen_ms INTEGER NOT NULL DEFAULT 0,"
              u"first_seen_ms INTEGER NOT NULL,"
@@ -343,11 +378,15 @@ void HarvestStore::recordSightings(const QList<HarvestSighting> &sightings)
     QSqlQuery sightingQuery {db};
     try
     {
-        torrentQuery.prepare(u"INSERT INTO torrents (infohash_v1, first_seen_ms, last_seen_ms, updated_at_ms, availability_score)"
-                  u" VALUES (:ih, :now, :now, :now, 1)"
+        // announce_count tracks how often a peer was actually seen *holding* the
+        // torrent (announce), as opposed to merely *asking* for it (get_peers/sample);
+        // it is the strongest "this is fetchable" signal for the metadata scheduler.
+        torrentQuery.prepare(u"INSERT INTO torrents (infohash_v1, first_seen_ms, last_seen_ms, updated_at_ms, availability_score, announce_count)"
+                  u" VALUES (:ih, :now, :now, :now, 1, :annInc)"
                   u" ON CONFLICT(infohash_v1) DO UPDATE SET"
                   u" last_seen_ms = :now, updated_at_ms = :now,"
-                  u" availability_score = availability_score + 1;"_s);
+                  u" availability_score = availability_score + 1,"
+                  u" announce_count = announce_count + :annInc;"_s);
 
         sightingQuery.prepare(u"INSERT INTO infohash_sightings (infohash_v1, source, peer_ip, peer_port, observed_at_ms)"
                   u" VALUES (:ih, :source, :ip, :port, :now);"_s);
@@ -359,6 +398,7 @@ void HarvestStore::recordSightings(const QList<HarvestSighting> &sightings)
 
             torrentQuery.bindValue(u":ih"_s, sighting.infoHashV1);
             torrentQuery.bindValue(u":now"_s, now);
+            torrentQuery.bindValue(u":annInc"_s, (sighting.source == u"announce"_s) ? 1 : 0);
             if (!torrentQuery.exec())
                 throw RuntimeError(torrentQuery.lastError().text());
 
@@ -654,10 +694,14 @@ QList<QString> HarvestStore::candidatesForMetadata(int limit) const
 
     auto db = QSqlDatabase::database(m_connectionName);
     QSqlQuery query {db};
+    // Order by the strongest fetchability signal first: infohashes a peer was seen
+    // *holding* (announce_count) before those merely *asked about* (availability via
+    // get_peers/sample), then by recency. This keeps the scarce metadata-fetch slots
+    // on torrents that actually have a reachable peer.
     query.prepare(u"SELECT infohash_v1 FROM torrents"
                   u" WHERE metadata_fetched = 0 AND fetch_attempts < :maxAttempts"
                   u"   AND (last_attempt_ms = 0 OR (:now - last_attempt_ms) > :backoff)"
-                  u" ORDER BY availability_score DESC, last_seen_ms DESC"
+                  u" ORDER BY announce_count DESC, availability_score DESC, last_seen_ms DESC"
                   u" LIMIT :limit;"_s);
     query.bindValue(u":maxAttempts"_s, MAX_FETCH_ATTEMPTS);
     query.bindValue(u":now"_s, nowMs());
