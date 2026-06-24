@@ -52,6 +52,7 @@ add_library(qbt_gui STATIC
     cookiesmodel.h
     deletionconfirmationdialog.h
     desktopintegration.h
+    dhtindex/dhtindexmodel.h
     dhtindex/dhtindexwidget.h
     dhtindex/harvestcontenthandler.h
     downloadfromurldialog.h
@@ -160,6 +161,7 @@ add_library(qbt_gui STATIC
     cookiesmodel.cpp
     deletionconfirmationdialog.cpp
     desktopintegration.cpp
+    dhtindex/dhtindexmodel.cpp
     dhtindex/dhtindexwidget.cpp
     dhtindex/harvestcontenthandler.cpp
     downloadfromurldialog.cpp

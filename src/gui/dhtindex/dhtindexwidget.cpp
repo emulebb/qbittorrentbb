@@ -28,81 +28,94 @@
 
 #include "dhtindexwidget.h"
 
-#include <algorithm>
 #include <optional>
 
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
-#include <QDateTime>
+#include <QComboBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QListWidgetItem>
 #include <QMenu>
+#include <QModelIndex>
 #include <QPushButton>
-#include <QScrollBar>
 #include <QSignalBlocker>
 #include <QSplitter>
-#include <QTableWidget>
+#include <QTableView>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
 #include "base/bittorrent/addtorrentparams.h"
+#include "base/bittorrent/harveststore.h"
 #include "base/bittorrent/session.h"
 #include "base/bittorrent/torrentdescriptor.h"
 #include "base/bittorrent/torrentinfo.h"
-#include "base/utils/misc.h"
 #include "gui/addnewtorrentdialog.h"
 #include "gui/torrentcontentwidget.h"
+#include "dhtindexmodel.h"
 #include "harvestcontenthandler.h"
 
 using namespace Qt::Literals::StringLiterals;
 
 namespace
 {
-    enum Column
+    // Crawl-intensity presets exposed by the GUI dial. Normal mirrors the shipped
+    // defaults; High/Max push the sample fan-out and metadata concurrency harder.
+    enum IntensityPreset
     {
-        COL_NAME = 0,
-        COL_CONTENT,
-        COL_SIZE,
-        COL_FILES,
-        COL_SIGHTINGS,
-        COL_FIRSTSEEN,
-        COL_LASTSEEN,
-        COL_COUNT
+        IntensityNormal = 0,
+        IntensityHigh = 1,
+        IntensityMax = 2
     };
 
-    const int SEARCH_LIMIT = 500;
-    const int FEED_LIMIT = 200;  // capped live feed of most-recent indexed torrents
-
-    // Table item that sorts by an underlying numeric value while displaying a
-    // formatted string (size/files/sightings/date).
-    class NumericItem final : public QTableWidgetItem
+    BitTorrent::HarvesterTuning tuningForPreset(const int preset, int &maxConcurrentOut)
     {
-    public:
-        NumericItem(const qlonglong value, const QString &text)
-            : QTableWidgetItem(text)
-            , m_value {value}
+        BitTorrent::HarvesterTuning tuning;
+        tuning.metadataTimeoutAnnounceMs = 8000;
+        tuning.metadataTimeoutSpeculativeMs = 3000;
+        switch (preset)
         {
+        case IntensityHigh:
+            tuning.sampleIntervalMs = 4000;
+            tuning.maxSampleNodesPerTick = 40;
+            tuning.sampleBudgetPerTick = 96;
+            tuning.recurseNodesPerSample = 6;
+            maxConcurrentOut = 96;
+            break;
+        case IntensityMax:
+            tuning.sampleIntervalMs = 2000;
+            tuning.maxSampleNodesPerTick = 60;
+            tuning.sampleBudgetPerTick = 144;
+            tuning.recurseNodesPerSample = 8;
+            maxConcurrentOut = 144;
+            break;
+        case IntensityNormal:
+        default:
+            tuning.sampleIntervalMs = 4000;
+            tuning.maxSampleNodesPerTick = 20;
+            tuning.sampleBudgetPerTick = 48;
+            tuning.recurseNodesPerSample = 4;
+            maxConcurrentOut = 48;
+            break;
         }
+        return tuning;
+    }
 
-        bool operator<(const QTableWidgetItem &other) const override
-        {
-            if (const auto *o = dynamic_cast<const NumericItem *>(&other))
-                return m_value < o->m_value;
-            return QTableWidgetItem::operator<(other);
-        }
-
-        QTableWidgetItem *clone() const override
-        {
-            return new NumericItem(m_value, text());
-        }
-
-    private:
-        qlonglong m_value = 0;
-    };
+    int presetForCurrentSettings()
+    {
+        const BitTorrent::HarvesterTuning tuning = BitTorrent::Session::instance()->dhtHarvesterTuning();
+        if (tuning.sampleBudgetPerTick >= 144)
+            return IntensityMax;
+        if (tuning.sampleBudgetPerTick >= 96)
+            return IntensityHigh;
+        return IntensityNormal;
+    }
 
     // Reconstruct a torrent descriptor from a stored bencoded info-dict by wrapping
     // it back into a minimal torrent ("d4:info<info-dict>e").
@@ -116,57 +129,6 @@ namespace
         if (!descr)
             return std::nullopt;
         return descr.value();
-    }
-
-    QString displayContentType(const QString &contentType)
-    {
-        if (contentType == u"disk-image"_s)
-            return DHTIndexWidget::tr("Disk image");
-        if (contentType == u"mixed"_s)
-            return DHTIndexWidget::tr("Mixed");
-        if (contentType == u"video"_s)
-            return DHTIndexWidget::tr("Video");
-        if (contentType == u"audio"_s)
-            return DHTIndexWidget::tr("Audio");
-        if (contentType == u"archive"_s)
-            return DHTIndexWidget::tr("Archive");
-        if (contentType == u"document"_s)
-            return DHTIndexWidget::tr("Document");
-        if (contentType == u"image"_s)
-            return DHTIndexWidget::tr("Image");
-        if (contentType == u"software"_s)
-            return DHTIndexWidget::tr("Software");
-        if (contentType == u"subtitle"_s)
-            return DHTIndexWidget::tr("Subtitle");
-        return DHTIndexWidget::tr("Other");
-    }
-
-    QString rowsSignature(const QList<BitTorrent::HarvestSearchResult> &results)
-    {
-        QString signature;
-        signature.reserve(results.size() * 96);
-        for (const BitTorrent::HarvestSearchResult &result : results)
-        {
-            signature += result.infoHashV1;
-            signature += u'|';
-            signature += result.name;
-            signature += u'|';
-            signature += result.contentType;
-            signature += u'|';
-            signature += QString::number(result.size);
-            signature += u'|';
-            signature += QString::number(result.fileCount);
-            signature += u'|';
-            signature += QString::number(result.sightings);
-            signature += u'|';
-            signature += QString::number(result.peers);
-            signature += u'|';
-            signature += QString::number(result.firstSeenMs);
-            signature += u'|';
-            signature += QString::number(result.lastSeenMs);
-            signature += u'\n';
-        }
-        return signature;
     }
 }
 
@@ -182,6 +144,17 @@ DHTIndexWidget::DHTIndexWidget(QWidget *parent)
                                " Requires binding to the VPN network interface (Tools > Options > Advanced)."));
     connect(m_enableBox, &QCheckBox::toggled, this, &DHTIndexWidget::onEnabledToggled);
     topRow->addWidget(m_enableBox);
+
+    topRow->addSpacing(16);
+    topRow->addWidget(new QLabel(tr("Crawl intensity:"), this));
+    m_intensityBox = new QComboBox(this);
+    m_intensityBox->addItems({tr("Normal"), tr("High"), tr("Max")});
+    m_intensityBox->setToolTip(tr("How hard the harvester crawls the DHT. Higher settings index"
+                                  " faster but use more CPU and VPN bandwidth."));
+    m_intensityBox->setCurrentIndex(presetForCurrentSettings());
+    connect(m_intensityBox, &QComboBox::currentIndexChanged, this, &DHTIndexWidget::onIntensityChanged);
+    topRow->addWidget(m_intensityBox);
+
     topRow->addStretch(1);
     m_statsLabel = new QLabel(this);
     topRow->addWidget(m_statsLabel);
@@ -202,41 +175,60 @@ DHTIndexWidget::DHTIndexWidget(QWidget *parent)
     searchRow->addWidget(searchButton);
     layout->addLayout(searchRow);
 
-    m_table = new QTableWidget(this);
-    m_table->setColumnCount(COL_COUNT);
-    m_table->setHorizontalHeaderLabels({tr("Name"), tr("Content"), tr("Size"), tr("Files"), tr("Sightings"),
-            tr("First seen"), tr("Last seen")});
+    // Left: content-type filter list (qB status-filter style). Right: the results
+    // table over the content pane.
+    m_filterList = new QListWidget(this);
+    m_filterList->setMinimumWidth(120);
+    m_filterList->setMaximumWidth(220);
+    connect(m_filterList, &QListWidget::currentRowChanged, this, &DHTIndexWidget::onFilterChanged);
+
+    m_model = new DHTIndexModel(this);
+    m_table = new QTableView(this);
+    m_table->setModel(m_model);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_table->setSortingEnabled(false);  // windowed view; rows are store-ordered by relevance
+    m_table->setAlternatingRowColors(true);
     m_table->verticalHeader()->setVisible(false);
-    m_table->setSortingEnabled(true);
-    m_table->sortByColumn(COL_SIGHTINGS, Qt::DescendingOrder);
+
     QHeaderView *header = m_table->horizontalHeader();
     header->setSectionResizeMode(QHeaderView::Interactive);  // user-resizable columns
     header->setSectionsMovable(true);
     header->setStretchLastSection(false);
-    m_table->setColumnWidth(COL_NAME, 380);
-    m_table->setColumnWidth(COL_CONTENT, 90);
-    m_table->setColumnWidth(COL_SIZE, 90);
-    m_table->setColumnWidth(COL_FILES, 60);
-    m_table->setColumnWidth(COL_SIGHTINGS, 80);
-    m_table->setColumnWidth(COL_FIRSTSEEN, 130);
-    m_table->setColumnWidth(COL_LASTSEEN, 130);
+    m_table->setColumnWidth(DHTIndexModel::COL_NAME, 360);
+    m_table->setColumnWidth(DHTIndexModel::COL_CONTENT, 80);
+    m_table->setColumnWidth(DHTIndexModel::COL_SIZE, 90);
+    m_table->setColumnWidth(DHTIndexModel::COL_FILES, 60);
+    m_table->setColumnWidth(DHTIndexModel::COL_SEEDS, 60);
+    m_table->setColumnWidth(DHTIndexModel::COL_PEERS, 60);
+    m_table->setColumnWidth(DHTIndexModel::COL_SIGHTINGS, 70);
+    m_table->setColumnWidth(DHTIndexModel::COL_FIRSTSEEN, 120);
+    m_table->setColumnWidth(DHTIndexModel::COL_LASTSEEN, 120);
+
     connect(m_table, &QWidget::customContextMenuRequested, this, &DHTIndexWidget::showContextMenu);
-    connect(m_table, &QTableWidget::itemSelectionChanged, this, &DHTIndexWidget::onSelectionChanged);
+    connect(m_table, &QTableView::doubleClicked, this, &DHTIndexWidget::onItemDoubleClicked);
+    connect(m_table->selectionModel(), &QItemSelectionModel::selectionChanged
+            , this, &DHTIndexWidget::onSelectionChanged);
 
     // Lower pane: the standard qBittorrent content tree for the selected torrent.
     m_content = new TorrentContentWidget(this);
 
-    auto *splitter = new QSplitter(Qt::Vertical, this);
-    splitter->setChildrenCollapsible(false);
-    splitter->addWidget(m_table);
-    splitter->addWidget(m_content);
-    splitter->setStretchFactor(0, 2);
-    splitter->setStretchFactor(1, 1);
-    layout->addWidget(splitter, 1);
+    auto *rightSplitter = new QSplitter(Qt::Vertical, this);
+    rightSplitter->setChildrenCollapsible(false);
+    rightSplitter->addWidget(m_table);
+    rightSplitter->addWidget(m_content);
+    rightSplitter->setStretchFactor(0, 2);
+    rightSplitter->setStretchFactor(1, 1);
+
+    auto *mainSplitter = new QSplitter(Qt::Horizontal, this);
+    mainSplitter->setChildrenCollapsible(false);
+    mainSplitter->addWidget(m_filterList);
+    mainSplitter->addWidget(rightSplitter);
+    mainSplitter->setStretchFactor(0, 0);
+    mainSplitter->setStretchFactor(1, 1);
+    layout->addWidget(mainSplitter, 1);
 
     auto *bottomRow = new QHBoxLayout;
     bottomRow->addStretch(1);
@@ -245,6 +237,11 @@ DHTIndexWidget::DHTIndexWidget(QWidget *parent)
     connect(m_downloadButton, &QPushButton::clicked, this, &DHTIndexWidget::downloadSelected);
     bottomRow->addWidget(m_downloadButton);
     layout->addLayout(bottomRow);
+
+    // Build the filter list (selects "All") then load the table for it, and keep the
+    // counts + crawl diagnostics fresh on a timer.
+    rebuildFilter();
+    m_model->setFilter(m_query, currentFilterType());
 
     m_statsTimer = new QTimer(this);
     m_statsTimer->setInterval(2000);
@@ -256,6 +253,15 @@ DHTIndexWidget::DHTIndexWidget(QWidget *parent)
 void DHTIndexWidget::onEnabledToggled(const bool enabled)
 {
     BitTorrent::Session::instance()->setDHTHarvesterEnabled(enabled);
+}
+
+void DHTIndexWidget::onIntensityChanged(const int presetIndex)
+{
+    int maxConcurrent = 48;
+    const BitTorrent::HarvesterTuning tuning = tuningForPreset(presetIndex, maxConcurrent);
+    auto *session = BitTorrent::Session::instance();
+    session->setDHTHarvesterTuning(tuning);
+    session->setDHTHarvesterMaxConcurrentMetadata(maxConcurrent);
 }
 
 void DHTIndexWidget::refreshStats()
@@ -273,80 +279,67 @@ void DHTIndexWidget::refreshStats()
                 , QString::number(stats.metadataOk), QString::number(stats.metadataTimeouts)
                 , QString::number(stats.inFlightFetch), QString::number(stats.pendingFetch)));
 
-    // Live feed: while no search is active, keep showing the most recent indexed
-    // torrents as they come in (capped).
-    if (m_searchEdit->text().trimmed().isEmpty())
-        setRows(BitTorrent::Session::instance()->recentDHTIndex(FEED_LIMIT, 0).items);
+    // Keep the per-type counts in the filter list fresh (new types appear, totals grow)
+    // without disturbing the loaded table or the user's selection.
+    rebuildFilter();
 }
 
 void DHTIndexWidget::search()
 {
-    const QString query = m_searchEdit->text().trimmed();
-    if (query.isEmpty())
-    {
-        setRows(BitTorrent::Session::instance()->recentDHTIndex(FEED_LIMIT, 0).items);
-        return;
-    }
-    setRows(BitTorrent::Session::instance()->searchDHTIndex(query, SEARCH_LIMIT, 0).items);
+    m_query = m_searchEdit->text().trimmed();
+    rebuildFilter();  // counts now reflect the query
+    m_model->setFilter(m_query, currentFilterType());
 }
 
-void DHTIndexWidget::setRows(const QList<BitTorrent::HarvestSearchResult> &results)
+void DHTIndexWidget::rebuildFilter()
 {
-    const QString newSignature = rowsSignature(results);
-    if (newSignature == m_rowsSignature)
-        return;
-    m_rowsSignature = newSignature;
+    const QString selectedType = currentFilterType();
+    const QList<BitTorrent::HarvestTypeCount> counts =
+            BitTorrent::Session::instance()->dhtIndexTypeCounts(m_query);
 
-    // Preserve the current selection across refreshes of the live feed.
-    const QString selected = selectedInfoHash();
-    const int scrollValue = m_table->verticalScrollBar()->value();
-    const int sortColumn = m_table->horizontalHeader()->sortIndicatorSection();
-    const Qt::SortOrder sortOrder = m_table->horizontalHeader()->sortIndicatorOrder();
+    qint64 total = 0;
+    for (const BitTorrent::HarvestTypeCount &c : counts)
+        total += c.count;
 
-    // Repopulate with sorting off, then restore it so the user's chosen sort
-    // column/order is reapplied to the new data.
-    const QSignalBlocker blocker {m_table};
-    m_table->setSortingEnabled(false);
-    m_table->setRowCount(results.size());
-    int row = 0;
-    for (const BitTorrent::HarvestSearchResult &result : results)
+    // Rebuild without firing currentRowChanged (the timer-driven refresh must not
+    // reload the table); restore the previously-selected type by value.
+    const QSignalBlocker blocker {m_filterList};
+    m_filterList->clear();
+
+    auto *allItem = new QListWidgetItem(tr("All (%1)").arg(total));
+    allItem->setData(Qt::UserRole, QString());
+    m_filterList->addItem(allItem);
+
+    int rowToSelect = 0;
+    int row = 1;
+    for (const BitTorrent::HarvestTypeCount &c : counts)
     {
-        auto *nameItem = new QTableWidgetItem(result.name);
-        nameItem->setData(Qt::UserRole, result.infoHashV1);
-        m_table->setItem(row, COL_NAME, nameItem);
-        auto *contentItem = new QTableWidgetItem(displayContentType(result.contentType));
-        contentItem->setData(Qt::UserRole, result.contentType);
-        m_table->setItem(row, COL_CONTENT, contentItem);
-        m_table->setItem(row, COL_SIZE, new NumericItem(result.size, Utils::Misc::friendlyUnit(result.size)));
-        m_table->setItem(row, COL_FILES, new NumericItem(result.fileCount, QString::number(result.fileCount)));
-        m_table->setItem(row, COL_SIGHTINGS, new NumericItem(result.sightings, QString::number(result.sightings)));
-        m_table->setItem(row, COL_FIRSTSEEN, new NumericItem(result.firstSeenMs
-                , QDateTime::fromMSecsSinceEpoch(result.firstSeenMs).toString(u"yyyy-MM-dd hh:mm"_s)));
-        m_table->setItem(row, COL_LASTSEEN, new NumericItem(result.lastSeenMs
-                , QDateTime::fromMSecsSinceEpoch(result.lastSeenMs).toString(u"yyyy-MM-dd hh:mm"_s)));
+        auto *item = new QListWidgetItem(u"%1 (%2)"_s.arg(
+                DHTIndexModel::displayContentType(c.contentType), QString::number(c.count)));
+        item->setData(Qt::UserRole, c.contentType);
+        m_filterList->addItem(item);
+        if (c.contentType == selectedType)
+            rowToSelect = row;
         ++row;
     }
-    m_table->setSortingEnabled(true);
-    m_table->sortByColumn(sortColumn, sortOrder);
+    m_filterList->setCurrentRow(rowToSelect);
+}
 
-    bool restoredSelection = false;
-    if (!selected.isEmpty())
-    {
-        for (int r = 0; r < m_table->rowCount(); ++r)
-        {
-            const QTableWidgetItem *item = m_table->item(r, COL_NAME);
-            if (item && (item->data(Qt::UserRole).toString() == selected))
-            {
-                m_table->selectRow(r);
-                restoredSelection = true;
-                break;
-            }
-        }
-    }
-    m_table->verticalScrollBar()->setValue(std::min(scrollValue, m_table->verticalScrollBar()->maximum()));
+QString DHTIndexWidget::currentFilterType() const
+{
+    const QListWidgetItem *item = m_filterList->currentItem();
+    return item ? item->data(Qt::UserRole).toString() : QString();
+}
 
-    if (!restoredSelection && !selected.isEmpty())
-        onSelectionChanged();
+void DHTIndexWidget::onFilterChanged()
+{
+    m_model->setFilter(m_query, currentFilterType());
+}
+
+void DHTIndexWidget::onItemDoubleClicked(const QModelIndex &index)
+{
+    if (index.isValid())
+        downloadSelected();
 }
 
 void DHTIndexWidget::onSelectionChanged()
@@ -403,18 +396,18 @@ void DHTIndexWidget::downloadSelected()
 
 QString DHTIndexWidget::selectedInfoHash() const
 {
-    const QTableWidgetItem *item = m_table->item(m_table->currentRow(), COL_NAME);
-    return item ? item->data(Qt::UserRole).toString() : QString();
+    return m_model->infoHashForIndex(m_table->currentIndex());
 }
 
 QString DHTIndexWidget::selectedMagnet() const
 {
-    const QString infoHash = selectedInfoHash();
+    const QModelIndex current = m_table->currentIndex();
+    const QString infoHash = m_model->infoHashForIndex(current);
     if (infoHash.isEmpty())
         return {};
 
-    const QTableWidgetItem *nameItem = m_table->item(m_table->currentRow(), COL_NAME);
-    const QString name = nameItem ? nameItem->text() : QString();
+    const QModelIndex nameIdx = current.sibling(current.row(), DHTIndexModel::COL_NAME);
+    const QString name = m_model->data(nameIdx, Qt::DisplayRole).toString();
     QString magnet = u"magnet:?xt=urn:btih:"_s + infoHash;
     if (!name.isEmpty())
         magnet += u"&dn="_s + QString::fromLatin1(QUrl::toPercentEncoding(name));

@@ -28,24 +28,28 @@
 
 #pragma once
 
-#include <QList>
 #include <QString>
 #include <QWidget>
 
-#include "base/bittorrent/harveststore.h"
-
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QLineEdit;
+class QListWidget;
+class QModelIndex;
 class QPoint;
 class QPushButton;
-class QTableWidget;
+class QTableView;
 class QTimer;
 
+class DHTIndexModel;
 class HarvestContentHandler;
 class TorrentContentWidget;
 
-// In-app search/browse view over the locally harvested BitTorrent DHT index.
+// In-app search/browse view over the locally harvested BitTorrent DHT index. Results
+// are a flat table; a filter panel on the left lists the detected content types (with
+// counts) and filters the table when a type is selected, like qBittorrent's status
+// filter on the transfer list. Table rows load lazily as the view is scrolled.
 class DHTIndexWidget final : public QWidget
 {
     Q_OBJECT
@@ -58,23 +62,30 @@ private slots:
     void search();
     void refreshStats();
     void onEnabledToggled(bool enabled);
+    void onIntensityChanged(int presetIndex);
+    void onFilterChanged();
     void onSelectionChanged();
+    void onItemDoubleClicked(const QModelIndex &index);
     void downloadSelected();
     void showContextMenu(const QPoint &pos);
 
 private:
-    void setRows(const QList<BitTorrent::HarvestSearchResult> &rows);
+    void rebuildFilter();          // refresh the left content-type list + counts
+    QString currentFilterType() const;  // selected content type ("" = all)
     QString selectedInfoHash() const;
     QString selectedMagnet() const;
 
     QCheckBox *m_enableBox = nullptr;
+    QComboBox *m_intensityBox = nullptr;
     QLabel *m_statsLabel = nullptr;
     QLabel *m_crawlStatsLabel = nullptr;
     QLineEdit *m_searchEdit = nullptr;
-    QTableWidget *m_table = nullptr;
+    QListWidget *m_filterList = nullptr;
+    QTableView *m_table = nullptr;
+    DHTIndexModel *m_model = nullptr;
     QPushButton *m_downloadButton = nullptr;
     TorrentContentWidget *m_content = nullptr;
     HarvestContentHandler *m_contentHandler = nullptr;
     QTimer *m_statsTimer = nullptr;
-    QString m_rowsSignature;
+    QString m_query;
 };
