@@ -893,6 +893,9 @@ namespace BitTorrent
         QList<AddTorrentAlertHandler> m_addTorrentAlertHandlers;
 
         QHash<TorrentID, lt::torrent_handle> m_downloadedMetadata;
+        // Peers discovered before async_add_torrent returns its handle. Once the
+        // add alert arrives they are connected directly for BEP-9 metadata.
+        QHash<TorrentID, QList<lt::tcp::endpoint>> m_pendingMetadataPeers;
 
         DHTHarvester *m_dhtHarvester = nullptr;
         TrackerScraper *m_trackerScraper = nullptr;  // lazily created on first scrape request

@@ -173,7 +173,9 @@ namespace BitTorrent
     private:
         void start();
         void stop();
-        void enqueue(const QString &infoHashV1, bool fromAnnounce);
+        void enqueue(const QString &infoHashV1, bool fromAnnounce
+            , const QList<QPair<QString, quint16>> &peers = {});
+        void rememberPeers(const QString &infoHashV1, const QList<QPair<QString, quint16>> &peers);
         // Probe-gate: most DHT-sniffed infohashes have no reachable seeder (they are
         // queries or crawler-only), so speculatively downloading metadata for them
         // clogs the fetch slots. Instead, fire a cheap dht_get_peers probe first and
@@ -239,6 +241,10 @@ namespace BitTorrent
         QQueue<PendingFetch> m_pending;
         QSet<QString> m_queued;             // in m_pending or m_inFlight (dedupe)
         QHash<QString, qint64> m_inFlight;  // infoHashV1 -> fetch deadline (ms, source-tiered)
+        // Live endpoints learned during announce/probe discovery. They must survive
+        // until async_add_torrent produces a handle; otherwise the metadata fetch
+        // unnecessarily repeats the DHT lookup and often misses its deadline.
+        QHash<QString, QList<QPair<QString, quint16>>> m_fetchPeers;
 
         // Probe-gate state: infohashes awaiting a dht_get_peers liveness probe, the
         // probes currently outstanding (ih -> sent ms, for timeout), and the live

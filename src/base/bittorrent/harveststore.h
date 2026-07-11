@@ -147,8 +147,8 @@ namespace BitTorrent
         // Metadata-fetch slot timeouts, tiered by discovery source: a peer seen
         // *holding* the torrent (announce) gets a longer leash; a speculative
         // get_peers/sample sighting (most have no holder) is dropped quickly.
-        int metadataTimeoutAnnounceMs = 8000;
-        int metadataTimeoutSpeculativeMs = 3000;
+        int metadataTimeoutAnnounceMs = 30000;
+        int metadataTimeoutSpeculativeMs = 15000;
     };
 
     struct HarvestPruneStats
@@ -212,7 +212,10 @@ namespace BitTorrent
         // are not in fetch-backoff, most promising first (availability then
         // recency). Drives coverage across sessions, unlike the in-memory
         // per-session popularity gate.
-        QList<QString> candidatesForMetadata(int limit) const;
+        // Selected rows are leased immediately by advancing last_attempt_ms. This
+        // prevents a silent top-ranked cohort from being returned every scheduler
+        // tick and starving the rest of the persistent queue.
+        QList<QString> candidatesForMetadata(int limit);
 
         // Retention: drop metadata-less torrents that are fetch-exhausted and not
         // seen within staleAgeMs, prune sightings older than sightingRetentionMs,

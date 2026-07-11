@@ -446,6 +446,7 @@ void DHTHarvester::stop()
     m_probeQueue.clear();
     m_probeQueued.clear();
     m_probing.clear();
+    m_fetchPeers.clear();
     m_candidateRequestInFlight = false;
 
     // The store (persistent SQLite index) is intentionally NOT torn down here: it
@@ -519,21 +520,10 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
             postSighting(event.infoHashHex, u"announce"_s, event.ip, event.port);
             // A peer HAS it -> skip the liveness probe (announce is itself proof of
             // a live peer) and enqueue the fetch directly.
-            enqueue(event.infoHashHex, /*fromAnnounce*/ true);
-            // The announcing peer holds the torrent: feed it straight to the
-            // in-flight metadata download instead of re-finding peers via DHT.
-            // connectDHTMetadataPeer touches GUI-thread Session state, so marshal it.
-            if (const auto it = m_inFlight.find(event.infoHashHex); it != m_inFlight.end())
-            {
-                // A real announcer arrived for an in-flight (possibly speculative)
-                // fetch: extend its deadline to the announce tier so it isn't cut
-                // short, and hand the peer to the download.
-                it.value() = std::max(it.value(), nowMs() + m_metadataTimeoutAnnounceMs);
-                const QString ih = event.infoHashHex;
-                const QString ip = event.ip;
-                const int port = event.port;
-                QMetaObject::invokeMethod(m_session, [s = m_session, ih, ip, port] { s->connectDHTMetadataPeer(ih, ip, port); }, Qt::QueuedConnection);
-            }
+            const QList<QPair<QString, quint16>> peers {
+                {event.ip, static_cast<quint16>(event.port)}
+            };
+            enqueue(event.infoHashHex, /*fromAnnounce*/ true, peers);
         }
         break;
     case HarvestAlertEvent::Type::SampleInfohashes:
@@ -600,7 +590,7 @@ void DHTHarvester::onAlertEvent(const HarvestAlertEvent &event)
                 {
                     // Confirmed live (a peer announced for it): enqueue a real fetch.
                     m_statProbeHits.fetch_add(1, std::memory_order_relaxed);
-                    enqueue(event.infoHashHex, /*fromAnnounce*/ false);
+                    enqueue(event.infoHashHex, /*fromAnnounce*/ false, event.nodes);
                 }
                 else
                 {
@@ -806,6 +796,7 @@ void DHTHarvester::onTimeoutTimer()
         QMetaObject::invokeMethod(m_session, [s = m_session, ih] { s->cancelDownloadMetadata(TorrentID::fromString(ih)); }, Qt::QueuedConnection);
         m_inFlight.remove(ih);
         m_queued.remove(ih);
+        m_fetchPeers.remove(ih);
         m_statMetadataTimeouts.fetch_add(1, std::memory_order_relaxed);
         if (m_store)
         {
@@ -826,6 +817,12 @@ void DHTHarvester::onTimeoutTimer()
         m_probing.remove(ih);
         m_probeQueued.remove(ih);
         m_statProbeMisses.fetch_add(1, std::memory_order_relaxed);
+        // WHY: without persistent backoff, the scheduler immediately leases the
+        // same silent top-ranked hashes again, starving every candidate below them.
+        if (m_store)
+        {
+            QMetaObject::invokeMethod(m_store, [store = m_store, ih] { store->noteFetchFailure(ih); }, Qt::QueuedConnection);
+        }
     }
     if (!deadProbes.isEmpty())
         probePump();
@@ -833,10 +830,62 @@ void DHTHarvester::onTimeoutTimer()
     requestPump();
 }
 
-void DHTHarvester::enqueue(const QString &infoHashV1, const bool fromAnnounce)
+void DHTHarvester::rememberPeers(const QString &infoHashV1, const QList<QPair<QString, quint16>> &peers)
 {
-    if (infoHashV1.isEmpty() || m_done.contains(infoHashV1) || m_queued.contains(infoHashV1))
+    if (infoHashV1.isEmpty() || peers.isEmpty())
         return;
+
+    QList<QPair<QString, quint16>> &known = m_fetchPeers[infoHashV1];
+    for (const auto &peer : peers)
+    {
+        if (peer.first.isEmpty() || (peer.second == 0) || known.contains(peer))
+            continue;
+        // A DHT reply can be large; a small diverse set is enough to avoid a
+        // second lookup while bounding per-candidate memory.
+        if (known.size() >= 64)
+            break;
+        known.append(peer);
+    }
+}
+
+void DHTHarvester::enqueue(const QString &infoHashV1, const bool fromAnnounce
+        , const QList<QPair<QString, quint16>> &peers)
+{
+    if (infoHashV1.isEmpty() || m_done.contains(infoHashV1))
+        return;
+
+    if (m_queued.contains(infoHashV1))
+    {
+        rememberPeers(infoHashV1, peers);
+        // An announce upgrades a queued speculative fetch to the longer confirmed
+        // timeout tier. If the fetch already started, also hand the new peer to it.
+        if (fromAnnounce)
+        {
+            for (PendingFetch &pending : m_pending)
+            {
+                if (pending.infoHash == infoHashV1)
+                {
+                    pending.fromAnnounce = true;
+                    break;
+                }
+            }
+            if (const auto it = m_inFlight.find(infoHashV1); it != m_inFlight.end())
+                it.value() = std::max(it.value(), nowMs() + m_metadataTimeoutAnnounceMs);
+        }
+
+        if (m_inFlight.contains(infoHashV1))
+        {
+            for (const auto &peer : peers)
+            {
+                const QString ip = peer.first;
+                const int port = peer.second;
+                QMetaObject::invokeMethod(m_session
+                    , [s = m_session, infoHashV1, ip, port] { s->connectDHTMetadataPeer(infoHashV1, ip, port); }
+                    , Qt::QueuedConnection);
+            }
+        }
+        return;
+    }
 
     // Cap the in-memory queue: at the DHT discovery rate the candidate set is
     // effectively unbounded, but the persistent store holds it all and the
@@ -844,6 +893,7 @@ void DHTHarvester::enqueue(const QString &infoHashV1, const bool fromAnnounce)
     if (m_pending.size() >= MAX_PENDING)
         return;
 
+    rememberPeers(infoHashV1, peers);
     m_queued.insert(infoHashV1);
     m_pending.enqueue({infoHashV1, fromAnnounce});
     requestPump();
@@ -977,10 +1027,19 @@ void DHTHarvester::pump()
         // declines (already known/fetching), it posts back onDownloadRejected().
         const int timeoutMs = fetch.fromAnnounce ? m_metadataTimeoutAnnounceMs : m_metadataTimeoutSpeculativeMs;
         m_inFlight.insert(ih, nowMs() + timeoutMs);
-        QMetaObject::invokeMethod(m_session, [this, s = m_session, d = descr.value(), ih]
+        const QList<QPair<QString, quint16>> peers = m_fetchPeers.value(ih);
+        QMetaObject::invokeMethod(m_session, [this, s = m_session, d = descr.value(), ih, peers]
         {
             if (!s->downloadMetadata(d))
                 QMetaObject::invokeMethod(this, [this, ih] { onDownloadRejected(ih); }, Qt::QueuedConnection);
+            else
+            {
+                // downloadMetadata() has reserved the TorrentID, although the
+                // async add alert may not have supplied its handle yet. The Session
+                // queues these endpoints until that handle exists.
+                for (const auto &peer : peers)
+                    s->connectDHTMetadataPeer(ih, peer.first, peer.second);
+            }
         }, Qt::QueuedConnection);
     }
 }
@@ -991,6 +1050,7 @@ void DHTHarvester::onDownloadRejected(const QString &infoHashV1)
     // the optimistic claim so the slot can be reused.
     m_inFlight.remove(infoHashV1);
     m_queued.remove(infoHashV1);
+    m_fetchPeers.remove(infoHashV1);
     requestPump();
 }
 
@@ -1045,6 +1105,7 @@ void DHTHarvester::onMetadataDownloaded(const TorrentInfo &info)
 
     m_inFlight.remove(v1);
     m_queued.remove(v1);
+    m_fetchPeers.remove(v1);
     m_done.insert(v1);
     m_statMetadataOk.fetch_add(1, std::memory_order_relaxed);
 

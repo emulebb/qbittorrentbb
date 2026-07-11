@@ -29,6 +29,7 @@
 #include "harveststore.h"
 
 #include <atomic>
+#include <utility>
 
 #include <QDateTime>
 #include <QPair>
@@ -639,7 +640,7 @@ bool HarvestStore::needsMetadata(const QString &infoHashV1) const
         return false;
 
     const qint64 lastAttempt = query.value(2).toLongLong();
-    if ((attempts > 0) && ((nowMs() - lastAttempt) < FETCH_BACKOFF_MS))
+    if ((lastAttempt > 0) && ((nowMs() - lastAttempt) < FETCH_BACKOFF_MS))
         return false;  // in backoff
 
     return true;
@@ -855,13 +856,17 @@ HarvestStats HarvestStore::stats() const
     return result;
 }
 
-QList<QString> HarvestStore::candidatesForMetadata(int limit) const
+QList<QString> HarvestStore::candidatesForMetadata(int limit)
 {
     QList<QString> out;
     if (limit <= 0)
         return out;
 
     auto db = QSqlDatabase::database(m_connectionName);
+    if (!db.transaction())
+        return out;
+
+    const qint64 now = nowMs();
     QSqlQuery query {db};
     // Order by the strongest fetchability signal first: infohashes a peer was seen
     // *holding* (announce_count) before those merely *asked about* (availability via
@@ -870,17 +875,40 @@ QList<QString> HarvestStore::candidatesForMetadata(int limit) const
     query.prepare(u"SELECT infohash_v1 FROM torrents"
                   u" WHERE metadata_fetched = 0 AND fetch_attempts < :maxAttempts"
                   u"   AND (last_attempt_ms = 0 OR (:now - last_attempt_ms) > :backoff)"
-                  u" ORDER BY announce_count DESC, availability_score DESC, last_seen_ms DESC"
+                  u" ORDER BY announce_count DESC, availability_score DESC, last_seen_ms DESC, id ASC"
                   u" LIMIT :limit;"_s);
     query.bindValue(u":maxAttempts"_s, MAX_FETCH_ATTEMPTS);
-    query.bindValue(u":now"_s, nowMs());
+    query.bindValue(u":now"_s, now);
     query.bindValue(u":backoff"_s, FETCH_BACKOFF_MS);
     query.bindValue(u":limit"_s, limit);
     if (!query.exec())
+    {
+        db.rollback();
         return out;
+    }
 
     while (query.next())
         out.append(query.value(0).toString());
+
+    // Lease every returned candidate before releasing the transaction. A probe
+    // timeout or explicit miss will additionally increment fetch_attempts, but the
+    // lease alone is enough to keep outstanding rows out of subsequent batches.
+    QSqlQuery lease {db};
+    lease.prepare(u"UPDATE torrents SET last_attempt_ms = :now, updated_at_ms = :now"
+                  u" WHERE infohash_v1 = :ih AND metadata_fetched = 0;"_s);
+    for (const QString &infoHash : std::as_const(out))
+    {
+        lease.bindValue(u":now"_s, now);
+        lease.bindValue(u":ih"_s, infoHash);
+        if (!lease.exec())
+        {
+            db.rollback();
+            return {};
+        }
+    }
+
+    if (!db.commit())
+        return {};
     return out;
 }
 

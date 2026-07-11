@@ -77,8 +77,8 @@ namespace
     BitTorrent::HarvesterTuning tuningForPreset(const int preset, int &maxConcurrentOut)
     {
         BitTorrent::HarvesterTuning tuning;
-        tuning.metadataTimeoutAnnounceMs = 8000;
-        tuning.metadataTimeoutSpeculativeMs = 3000;
+        tuning.metadataTimeoutAnnounceMs = 30000;
+        tuning.metadataTimeoutSpeculativeMs = 15000;
         switch (preset)
         {
         case IntensityHigh:

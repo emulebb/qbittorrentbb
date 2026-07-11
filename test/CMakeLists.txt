@@ -13,6 +13,7 @@ set(testFiles
     testconceptsstringable.cpp
     testglobal.cpp
     testharvestcontentclassifier.cpp
+    testharveststore.cpp
     testorderedset.cpp
     testpath.cpp
     testutilsbytearray.cpp

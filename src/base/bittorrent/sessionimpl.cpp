@@ -461,8 +461,8 @@ SessionImpl::SessionImpl(QObject *parent)
     , m_dhtHarvesterMaxSampleNodesPerTick(BITTORRENT_SESSION_KEY(u"DHTHarvesterMaxSampleNodesPerTick"_s), 20)
     , m_dhtHarvesterSampleBudgetPerTick(BITTORRENT_SESSION_KEY(u"DHTHarvesterSampleBudgetPerTick"_s), 48)
     , m_dhtHarvesterRecurseNodesPerSample(BITTORRENT_SESSION_KEY(u"DHTHarvesterRecurseNodesPerSample"_s), 4)
-    , m_dhtHarvesterMetadataTimeoutAnnounceMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterMetadataTimeoutAnnounceMs"_s), 8000)
-    , m_dhtHarvesterMetadataTimeoutSpeculativeMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterMetadataTimeoutSpeculativeMs"_s), 3000)
+    , m_dhtHarvesterMetadataTimeoutAnnounceMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterMetadataTimeoutAnnounceMs"_s), 30000)
+    , m_dhtHarvesterMetadataTimeoutSpeculativeMs(BITTORRENT_SESSION_KEY(u"DHTHarvesterMetadataTimeoutSpeculativeMs"_s), 15000)
     , m_dhtHarvesterScrapeTracker(BITTORRENT_SESSION_KEY(u"DHTHarvesterScrapeTracker"_s), u"udp://tracker.opentrackr.org:1337/announce"_s)
     , m_isAutoBanUnknownPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanUnknownPeer"_s), false)
     , m_isAutoBanBTPlayerPeerEnabled(BITTORRENT_SESSION_KEY(u"AutoBanBTPlayerPeer"_s), false)
@@ -1107,7 +1107,7 @@ void SessionImpl::connectDHTMetadataPeer(const QString &infoHashV1, const QStrin
 
     const auto id = TorrentID::fromString(infoHashV1);
     const auto iter = m_downloadedMetadata.constFind(id);
-    if ((iter == m_downloadedMetadata.constEnd()) || !iter.value().is_valid())
+    if (iter == m_downloadedMetadata.constEnd())
         return;
 
     lt::error_code ec;
@@ -1116,6 +1116,17 @@ void SessionImpl::connectDHTMetadataPeer(const QString &infoHashV1, const QStrin
         return;
 
     const lt::tcp::endpoint endpoint(addr, static_cast<unsigned short>(port));
+    if (!iter.value().is_valid())
+    {
+        // WHY: async_add_torrent reserves the ID before its add alert supplies a
+        // handle. Retain the already-discovered peer so BEP-9 can start immediately
+        // when that handle arrives instead of repeating a slow DHT lookup.
+        QList<lt::tcp::endpoint> &pending = m_pendingMetadataPeers[id];
+        if (!pending.contains(endpoint) && (pending.size() < 64))
+            pending.append(endpoint);
+        return;
+    }
+
     try
     {
         iter.value().connect_peer(endpoint);
@@ -3052,6 +3063,7 @@ bool SessionImpl::cancelDownloadMetadata(const TorrentID &id)
 
     const lt::torrent_handle nativeHandle = downloadedMetadataIter.value();
     m_downloadedMetadata.erase(downloadedMetadataIter);
+    m_pendingMetadataPeers.remove(id);
 
     if (!nativeHandle.is_valid())
         return true;
@@ -3064,6 +3076,7 @@ bool SessionImpl::cancelDownloadMetadata(const TorrentID &id)
         // so we need to remove both entries
         const auto altID = TorrentID::fromSHA1Hash(infoHash.v1());
         m_downloadedMetadata.remove(altID);
+        m_pendingMetadataPeers.remove(altID);
     }
 #endif
 
@@ -3646,7 +3659,9 @@ bool SessionImpl::downloadMetadata(const TorrentDescriptor &torrentDescr)
             const QString msg = QString::fromStdString(alert->message());
             LogMsg(tr("Failed to download torrent metadata. Reason: \"%1\"").arg(msg), Log::WARNING);
 
-            m_downloadedMetadata.remove(getInfoHash(alert->params).toTorrentID());
+            const TorrentID failedID = getInfoHash(alert->params).toTorrentID();
+            m_downloadedMetadata.remove(failedID);
+            m_pendingMetadataPeers.remove(failedID);
         }
         else
         {
@@ -3657,6 +3672,20 @@ bool SessionImpl::downloadMetadata(const TorrentDescriptor &torrentDescr)
                 ; downloadedMetadataIter != m_downloadedMetadata.end())
             {
                 downloadedMetadataIter.value() = alert->handle;
+                // Peers may have arrived with the DHT probe/announce before this
+                // asynchronous add completed. Connect them now while they are fresh.
+                const QList<lt::tcp::endpoint> pendingPeers = m_pendingMetadataPeers.take(torrentID);
+                for (const lt::tcp::endpoint &peer : pendingPeers)
+                {
+                    try
+                    {
+                        alert->handle.connect_peer(peer);
+                    }
+                    catch (const std::exception &)
+                    {
+                        // The torrent may be removed while the alert batch drains.
+                    }
+                }
                 if (infoHash.isHybrid())
                 {
                     // index hybrid magnet links by both v1 and v2 info hashes
@@ -6623,6 +6652,7 @@ void SessionImpl::handleMetadataReceivedAlert(const lt::metadata_received_alert 
     {
         found = true;
         m_downloadedMetadata.erase(iter);
+        m_pendingMetadataPeers.remove(torrentID);
     }
 #ifdef QBT_USES_LIBTORRENT2
     if (infoHash.isHybrid())
@@ -6632,6 +6662,7 @@ void SessionImpl::handleMetadataReceivedAlert(const lt::metadata_received_alert 
         {
             found = true;
             m_downloadedMetadata.erase(iter);
+            m_pendingMetadataPeers.remove(altID);
         }
     }
 #endif

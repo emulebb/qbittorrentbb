@@ -52,7 +52,7 @@
     { "path": "src/webui/CMakeLists.txt", "reason": "Register torznabcontroller" }
   ],
   "features": [
-    "DHT harvester -> local SQLite index (FTS5): passive get_peers/announce + BEP-51 sampling + connected swarm-peer BEP-51 seeding; popularity-gated BEP-9 metadata; real swarm counts via dht_get_peers.",
+    "DHT harvester -> local SQLite index (FTS5): passive get_peers/announce + BEP-51 sampling + connected swarm-peer BEP-51 seeding; leased/backed-off metadata scheduling; direct handoff of probe/announce peers to BEP-9 fetches; real swarm counts via dht_get_peers.",
     "DHT Index GUI tab (sortable/resizable, content pane, download) and an internal RSS source exposing new findings (auto-download via RSS rules).",
     "Torznab/Prowlarr indexer at /api/v2/torznab/index with ?apikey= query auth.",
     "VPN-safe egress: drives the emulebb-libtorrent egress hardening + DNS resolver + VPN guard via INI keys (Session\\VPNGuard*); fail-closed on a leak."
