@@ -8,6 +8,10 @@
 
 Everything below is this repo's local deltas only:
 
+- **Lifecycle: paused experiment.** This repository is preserved for analysis
+  and explicit on-demand builds. Do not start feature work, scheduled upstream
+  synchronization, native Windows VPN development, or release work unless the
+  operator explicitly reopens the experiment.
 - This repo is the qBittorrentBB fork (Qt6 + a libtorrent fork). It is a managed
   BitTorrent client, separate from the eD2K/Kad eMuleBB line.
 - BUILD OUTPUT: configure CMake out-of-source with the build/binary directory

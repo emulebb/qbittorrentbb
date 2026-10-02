@@ -1,9 +1,10 @@
 # qBittorrentBB — Branded export + harvested disk store (notes 1, 3)
 
-Status: design / direction. Captured 2026-06-14. Post-0.7.3; full development
-mode. This is the qBittorrentBB-side slice of the suite metadata fabric. Suite
-context: `emulebb-tooling/docs/active/SUITE-JOINT-ROADMAP.md` and
-`SUITE-METADATA-FABRIC.md`. DHT harvester baseline: this fork's existing DHT
+> **Historical design:** qBittorrentBB is paused and this plan is not scheduled.
+
+Status: retired design. Captured 2026-06-14. This was the qBittorrentBB-side
+slice of the former suite metadata fabric, now preserved under
+`emulebb-tooling/docs/history`. DHT harvester baseline: this fork's existing DHT
 harvester (`src/base/bittorrent/harveststore.*`, `dhtharvester.*`, Torznab
 endpoint).
 
@@ -11,7 +12,7 @@ endpoint).
 
 **eMuleBB** = the C++ MFC desktop app. **emulebb-rust** = the Rust eD2K/Kad core.
 The branded export feeds the active eD2K share — **primarily emulebb-rust**
-(`emulebb-metadata`, the strategic forward core); MFC `known.met` is a compat
+(`emulebb-metadata`, then considered the strategic forward core); MFC `known.met` is a compat
 path. "eMuleBB stack" here means whichever eMule-family core is active.
 
 ## Two strictly separate libraries

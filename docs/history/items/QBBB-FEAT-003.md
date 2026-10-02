@@ -3,7 +3,7 @@ id: QBBB-FEAT-003
 workflow: github
 github_issue: https://github.com/emulebb/qbittorrentbb/issues/3
 title: Indexer schema + Torznab contract parity with emulebb-rust
-status: OPEN
+status: WONT_DO
 priority: Minor
 category: feature
 labels: [torznab, indexer, parity, prowlarr, suite]

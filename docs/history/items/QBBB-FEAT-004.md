@@ -3,7 +3,7 @@ id: QBBB-FEAT-004
 workflow: github
 github_issue: https://github.com/emulebb/qbittorrentbb/issues/4
 title: Make vpnReady() truly fail-closed (verify bound IP equals the tunnel) — release-blocking
-status: OPEN
+status: WONT_DO
 priority: Critical
 category: feature
 labels: [vpn, anonymity, safety, dht, release-blocker]

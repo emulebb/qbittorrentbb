@@ -3,7 +3,7 @@ id: QBBB-FEAT-005
 workflow: github
 github_issue: https://github.com/emulebb/qbittorrentbb/issues/5
 title: Headless nox Linux build + GHCR Docker image
-status: OPEN
+status: WONT_DO
 priority: Major
 category: feature
 labels: [docker, ghcr, nox, packaging, bundle]
@@ -22,7 +22,7 @@ Add a **headless `nox` Linux build** of the qBittorrentBB fork and publish it as
 **linuxserver-style** Docker image to **GHCR**
 (`ghcr.io/emulebb/qbittorrentbb-nox`, `latest` + versioned), built and pushed by
 this repo's CI. Design:
-[`emulebb-tooling/docs/active/SUITE-DOCKER.md`](../../../emulebb-tooling/docs/active/SUITE-DOCKER.md).
+[`emulebb-tooling/docs/history/HIST-SUITE-DOCKER.md`](../../../emulebb-tooling/docs/history/HIST-SUITE-DOCKER.md).
 
 ## Why This Matters
 

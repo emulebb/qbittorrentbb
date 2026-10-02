@@ -3,7 +3,7 @@ id: QBBB-FEAT-002
 workflow: github
 github_issue: https://github.com/emulebb/qbittorrentbb/issues/2
 title: Persist harvested torrents to a sharded local on-disk store
-status: OPEN
+status: WONT_DO
 priority: Major
 category: feature
 labels: [dht, harvester, storage, reconciliation, suite]

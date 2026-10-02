@@ -3,7 +3,7 @@ id: QBBB-FEAT-001
 workflow: github
 github_issue: https://github.com/emulebb/qbittorrentbb/issues/1
 title: Branded idempotent export of the live torrent library to the eD2K share
-status: OPEN
+status: WONT_DO
 priority: Major
 category: feature
 labels: [export, torrents, branding, suite, ed2k-bridge]
