@@ -9,9 +9,6 @@ name: Nightly - Windows (folder)
 # Distinct from nightly-upstream.yml (the inherited upstream qBittorrent nightly).
 
 on:
-  schedule:
-    # 04:37 UTC daily; off the top of the hour to dodge the scheduler backlog.
-    - cron: "37 4 * * *"
   workflow_dispatch: {}
 
 permissions: {}

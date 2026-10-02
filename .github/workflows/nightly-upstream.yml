@@ -10,9 +10,6 @@
 name: Nightly upstream sync
 
 on:
-  schedule:
-    # UTC. Off the top-of-hour spike and the other eMuleBB nightly slots.
-    - cron: '23 3 * * *'
   workflow_dispatch:
     inputs:
       force:
